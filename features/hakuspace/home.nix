@@ -199,6 +199,15 @@ in
                 substituteInPlace $out/share/hakuspace/scripts/exit.sh \
                   --replace-fail 'systemctl --user stop graphical-session.target 2>/dev/null' 'true  # nix: removed -- this stop killed exit.sh (in the bar cgroup) before the compositor exit' \
                   --replace-fail "hyprctl eval 'hl.dispatch(hl.dsp.exit())'" 'hyprctl dispatch exit'
+
+                # Workspace numbers in the bar: the ext/workspaces module (what
+                # group/hworkspaces uses on every layout) showed dot icons, so
+                # there was no telling which workspace SUPER+<n> lands on. Show
+                # the workspace NAME instead, which Hyprland sets to the number.
+                # JSON-surgical so only ext/workspaces changes, not the niri /
+                # hyprland / mango definitions that share "format": "{icon}".
+                ${pkgs.python3}/bin/python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c["ext/workspaces"]["format"]="{name}"; json.dump(c,open(p,"w"),ensure_ascii=False,indent=4)' \
+                  $out/share/hakuspace/config/waybar/module/workspace_module
               '';
           });
 

@@ -312,6 +312,9 @@
       */
       wdisplays
       wlr-randr
+
+      cava # standalone terminal audio visualizer (hakuspace bundles its own
+      # wrapped copy for the bar underbar; this puts `cava` on PATH too)
     ];
 
     power.enable = true;
