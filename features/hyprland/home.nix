@@ -409,6 +409,30 @@ in
         # (GDK_SCALE etc.) -- deliberate trade: crisp-but-small beats
         # blurry, and this host runs almost everything native Wayland.
         xwayland.force_zero_scaling = true;
+
+        # damage_tracking = 0 (default 2 = full damage tracking): stop trusting
+        # per-region damage and redraw the whole output each frame. Native-
+        # Wayland Qt/KDE apps (Okular) intermittently went BLACK -- the surface
+        # stopped being repainted after some event (idle DPMS wake, workspace
+        # switch, occlusion) and a window resize did NOT bring it back, which
+        # rules out a simple stale-buffer-until-damage bug and points at the
+        # compositor's damage regions going wrong. Full redraws sidestep it, at
+        # a modest GPU/power cost. Verified live: `hyprctl getoption
+        # debug:damage_tracking` -> 0 after hl.config applied it.
+        debug.damage_tracking = 0;
+
+        # No Hyprland startup splash. Right after tuigreet login, before awww
+        # paints the wallpaper, Hyprland shows its DEFAULT wallpaper -- the
+        # Hyprland logo plus a splash line (version / random blurb). That is the
+        # "text with the hyprland logo" that flashes up on login. Kill all three
+        # so the hand-off from greeter to wallpaper is a clean black, not a
+        # branded flash. force_default_wallpaper = 0 also drops the logo image
+        # itself, not just the text.
+        misc = {
+          disable_hyprland_logo = true;
+          disable_splash_rendering = true;
+          force_default_wallpaper = 0;
+        };
       };
 
       /*
@@ -536,13 +560,25 @@ in
       -- parseTableField already found and is parsing, not for whether the
       -- field may be omitted. Confirmed live: leaving it out errored
       -- "missing required field \"enabled\"" on all five calls.
-      hl.animation({ leaf = "global", enabled = true, speed = 4, bezier = "default" })
-      hl.animation({ leaf = "windows", enabled = true, speed = 3, bezier = "default" })
-      hl.animation({ leaf = "border", enabled = true, speed = 3, bezier = "default" })
-      hl.animation({ leaf = "fade", enabled = true, speed = 3, bezier = "default" })
+      -- bezier = "linear", not "default": the built-in "default" curve is
+      -- 0.05,0.9,0.1,1.05 -- the trailing 1.05 OVERSHOOTS past the target and
+      -- springs back, which is the "jelly" wobble (most visible on resizing
+      -- layer surfaces, e.g. the desktop-icons layer). "linear" ends exactly
+      -- at 1.0, so motion stays smooth but never bounces. This hl API exposes
+      -- only the built-in named beziers (hl.bezier / hl.keyword are absent), so
+      -- a custom ease-out is not available -- "linear" is the no-overshoot one.
+      hl.animation({ leaf = "global", enabled = true, speed = 4, bezier = "linear" })
+      hl.animation({ leaf = "windows", enabled = true, speed = 3, bezier = "linear" })
+      hl.animation({ leaf = "border", enabled = true, speed = 3, bezier = "linear" })
+      hl.animation({ leaf = "fade", enabled = true, speed = 3, bezier = "linear" })
+      -- Layer surfaces explicitly on the no-overshoot curve too: this is where
+      -- the jelly was actually seen (the desktop-icons layer bouncing on every
+      -- resize). The reimplemented desktop layer no longer resizes, but pinning
+      -- this stops any layer from wobbling.
+      hl.animation({ leaf = "layers", enabled = true, speed = 3, bezier = "linear" })
       -- slidevert: vertical slide, matching niri's vertical workspace model
       -- and the gesture's vertical swipe direction above.
-      hl.animation({ leaf = "workspaces", enabled = true, speed = 3, bezier = "default", style = "slidevert" })
+      hl.animation({ leaf = "workspaces", enabled = true, speed = 3, bezier = "linear", style = "slidevert" })
 
       -- Auto-scale differs between compositors (Hyprland picked 2.0 for this
       -- 2880x1800 panel; niri's own auto heuristic apparently picked something
@@ -611,6 +647,29 @@ in
       -- (see packages/claude-desktop/package.nix), so it composites
       -- identically to kitty/dolphin.
       hl.window_rule({ match = { class = "^(com\\.anthropic\\.Claude)$" }, opacity = "0.65 0.65" })
+      -- qalculate: same 0.65 glass as kitty/Claude/dolphin. Its runtime
+      -- Wayland app_id is the reverse-DNS "io.github.Qalculate.qalculate-qt"
+      -- (NOT the .desktop's StartupWMClass "qalculate-qt") -- confirmed with
+      -- `hyprctl clients | grep -i qalc`.
+      hl.window_rule({ match = { class = "^(io\\.github\\.Qalculate\\.qalculate-qt)$" }, opacity = "0.65 0.65" })
+      -- Settings / utility panels: same 0.65 glass. They already float+center
+      -- (rules further down); on control panels the translucency is purely
+      -- aesthetic -- no content to mud.
+      hl.window_rule({ match = { class = "^(.*pavucontrol.*)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(blueman-manager)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(nm-connection-editor)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(.*[Ss]ystem-config-printer.*)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(com\\.github\\.wwmm\\.easyeffects)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(wdisplays)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(qt6ct)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(org\\.kde\\.systemsettings)$" }, opacity = "0.65 0.65" })
+      -- Emacs: glass on the editor; both app_ids it reports (X11 "emacs",
+      -- pgtk "org.gnu.emacs").
+      hl.window_rule({ match = { class = "^(emacs)$" }, opacity = "0.65 0.65" })
+      hl.window_rule({ match = { class = "^(org\\.gnu\\.emacs)$" }, opacity = "0.65 0.65" })
+      -- Firefox: MILDER 0.9, not 0.65 -- web content (photos, video, white
+      -- pages) muds at 0.65; 0.9 stays legible while still glassy.
+      hl.window_rule({ match = { class = "^(firefox)$" }, opacity = "0.9 0.9" })
       -- Galaxy Buds client: small settings-style utility, better floating
       -- than as a full tape column. Class from the package's own
       -- makeDesktopItem name (= meta.mainProgram = "GalaxyBudsClient",
@@ -639,6 +698,7 @@ in
       hl.window_rule({ match = { class = "^(qt6ct)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(org\\.kde\\.systemsettings)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(xdg-desktop-portal-.*)$" }, float = true, center = true })
+      hl.window_rule({ match = { class = "^(io\\.github\\.Qalculate\\.qalculate-qt)$" }, float = true, center = true })
 
       -- ============================================================
       -- Binds. Key-layout aligned with end-4/dots-hyprland's
@@ -724,6 +784,8 @@ in
         end
       end)
       hl.bind(mod .. " + ALT + space", hl.dsp.window.float())
+      -- Same float toggle on Mod+Shift+F (pairs with Mod+F = fullscreen).
+      hl.bind(mod .. " + SHIFT + F", hl.dsp.window.float())
       -- end-4's Mod+P is "pin". Mod+P is left free here for a shell to claim
       -- (DMS binds its notepad there), so pin goes on Mod+Alt+P rather than
       -- taking a key the shell layer is expected to want.
@@ -861,6 +923,13 @@ in
       hl.bind("Print", hl.dsp.exec_cmd("hyprshot -m region --clipboard-only --silent"))
       hl.bind("CTRL + Print", hl.dsp.exec_cmd("hyprshot -m output --clipboard-only --silent"))
       hl.bind("ALT + Print", hl.dsp.exec_cmd("hyprshot -m window -m active --clipboard-only --silent"))
+      -- Mod+Shift+S: region screenshot that SAVES a file and copies it -- the
+      -- muscle-memory shortcut, discoverable without a Print key (awkward on
+      -- this laptop). Uses hakuspace's screenshot.sh (grim+slurp) rather than
+      -- raw hyprshot so it writes to SCREENSHOT_DIR from main_setting.sh
+      -- (~/Pictures/Screenshots) -- the single source of truth, matching where
+      -- recordings go via SCREENREC_SAVE_DIR -- and notifies with the path.
+      hl.bind(mod .. " + SHIFT + S", hl.dsp.exec_cmd("$HOME/.local/bin/screenshot.sh"))
       hl.bind(mod .. " + SHIFT + P", hl.dsp.dpms({ action = "off" }))
 
     '';

@@ -48,7 +48,8 @@ lib.mkIf (osConfig.my.kitty.enable && inScope) {
       allow_remote_control = "yes";
 
       # Inspired by https://github.com/end-4/dots-hyprland/blob/main/dots/.config/kitty/kitty.conf
-      window_margin_width = 21.75;
+      # (end-4 uses 21.75, which reads as a lot of dead space here -- trimmed.)
+      window_margin_width = 8;
       # Kitty ≥0.40: integer, not yes/no; HM bools become `no` and break parsing. 0 = never confirm.
       confirm_os_window_close = 0;
 

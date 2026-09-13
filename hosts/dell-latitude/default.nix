@@ -1,4 +1,4 @@
-{ pkgs, inputs, ... }:
+{ pkgs, lib, inputs, ... }:
 
 {
   imports = [
@@ -26,6 +26,22 @@
   services.thermald.enable = true;
   services.fwupd.enable = true;
   zramSwap.enable = true;
+
+  # Portable microcode. The Latitude is Intel (its hardware-config pulls the
+  # Intel blob), but this SSD also gets run on an AMD box -- the HP Victus --
+  # while the Latitude is out for repair. amd-ucode rides in the initrd next to
+  # intel-ucode; each CPU's early loader applies only its own, so this is free
+  # on the Latitude and gives the Ryzen its microcode updates meanwhile.
+  hardware.cpu.amd.updateMicrocode = true;
+
+  /*
+    Steam. programs.steam (not just the package) is required on NixOS: it wraps
+    Steam in its FHS environment, pulls the 32-bit graphics/runtime libraries
+    (it flips hardware.graphics.enable32Bit on itself), and installs the udev
+    rules for controllers. allowUnfree is already true. Intel iGPU here, so
+    expect light games only -- but Steam itself, Proton, and remote play work.
+  */
+  programs.steam.enable = true;
 
   /*
     Syncthing, running as benjamin. overrideDevices/overrideFolders = false so
@@ -225,6 +241,13 @@
       lever that works; --builders cannot reach the eval step. See the
       `enable` option's description for why.
     */
+    globaltun = {
+      enable = true;
+      jump = "r0k0r@172.30.0.215";
+      remote = "root@192.168.0.100";
+      sshKey = "/etc/nix/remote-builder/ssh_key";
+      remoteSocksPort = 1083;
+    };
     remote-builder.client = {
       enable = true;
       wrappers.enable = true;
@@ -260,6 +283,38 @@
       kdePackages.okular
       btop # hakuspace's theme pipeline already writes ~/.config/btop themes
       gimp
+      qalculate-qt # calculator (Qt build -- themes via qt6ct like the KDE apps)
+      lunar-client # Minecraft client/launcher
+      discord
+
+      # linecast (ashuttl/linecast): terminal weather/tides/sun/moon/radar.
+      # Not in nixpkgs; packaged straight from PyPI. Pure Python, hatchling
+      # build, and NO runtime deps on Linux (its only deps are win32-gated), so
+      # a bare buildPythonApplication is the whole story. A literal expression
+      # (no mkIf), so lookup.nix reads it fine.
+      (python3.pkgs.buildPythonApplication rec {
+        pname = "linecast";
+        version = "2.4.0";
+        pyproject = true;
+        src = python3.pkgs.fetchPypi {
+          inherit pname version;
+          hash = "sha256-TH4elNMit617YssDriVxVowHNUgc3PJGO6vuAP5CYTw=";
+        };
+        build-system = [ python3.pkgs.hatchling ];
+        nativeBuildInputs = [ makeWrapper ];
+        pythonImportsCheck = [ "linecast" ];
+        meta.mainProgram = "linecast";
+        # linecast ships short aliases (weather, moon, tides, ...) that just
+        # dispatch to `linecast <name>`. Upstream's `linecast link` creates them
+        # as symlinks NEXT TO the binary -- which is the read-only Nix store, so
+        # it errors. Bake them as wrappers here instead; each is on PATH and
+        # runs the matching command.
+        postInstall = ''
+          for a in weather sunshine moon sky tides radar maps; do
+            makeWrapper $out/bin/linecast $out/bin/$a --add-flags "$a"
+          done
+        '';
+      })
 
       # Nix workflow. nh wraps nixos-rebuild with a change diff; nom turns the
       # build wall-of-text into a live tree; comma (`, foo`) runs a program
@@ -282,6 +337,7 @@
       jless
       yq-go
       lazygit
+      uv # fast Python package/project manager (Astral)
       bluetui # Bluetooth TUI; the waybar bluetooth icon opens it, also on PATH
 
       # Sonora, from its flake (prebuilt packages.default). Literal system
@@ -322,7 +378,10 @@
     easyeffects = {
       enable = true;
       # Effects applied from login, window hidden -- the feature's own
-      # graphical-session service, not an exec-once.
+      # graphical-session service, not an exec-once. (Was briefly disabled while
+      # this SSD ran on the AMD Victus, where EasyEffects' virtual-sink default
+      # let audio bypass mute; back on the Latitude, where its presets fit the
+      # speakers, it's re-enabled.)
       startUp = true;
     };
 
@@ -374,6 +433,23 @@
       enable = true;
       kdeconnect.enable = true;
     };
+  };
+
+  /*
+    Sonora (music player), host-scoped since it is a dell-latitude-only app.
+    Installed above; here it only floats + centers on the current workspace,
+    exactly like Dolphin and the other utility windows -- no autostart (removed
+    per request; launch it from the dock/menu), no special workspace, no summon
+    keybind. extraConfig is types.lines and features/hyprland's fragments are
+    mkAfter, so this appends cleanly to the generated Lua.
+  */
+  home-manager.users.benjamin = {
+    wayland.windowManager.hyprland.extraConfig = lib.mkAfter ''
+      -- Sonora floats+centers, same as Dolphin. Class from StartupWMClass.
+      hl.window_rule({ match = { class = "^(sonora)$" }, float = true, center = true })
+      -- ...and the same 0.65 glass as the other chrome-heavy apps.
+      hl.window_rule({ match = { class = "^(sonora)$" }, opacity = "0.65 0.65" })
+    '';
   };
 
   networking.hostName = "dell-latitude";
