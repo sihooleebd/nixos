@@ -34,6 +34,20 @@
   # on the Latitude and gives the Ryzen its microcode updates meanwhile.
   hardware.cpu.amd.updateMicrocode = true;
 
+  # Wacom One Pen Display 13: the configuration GUI. There is NO Wacom Desktop
+  # Center on Linux, and the KDE/GNOME Wacom panels need X11/GNOME -- so on this
+  # Wayland/Hyprland session the working configurator is OpenTabletDriver. It
+  # ships a config for this exact device (Wacom DTC-133 = USB 056a:03a6,
+  # verified), and its GUI `otd-gui` sets active area, pressure curve, and
+  # pen-button/gesture bindings. The module runs the daemon, installs udev rules,
+  # and -- required for OTD to claim the tablet -- blacklists the kernel `wacom`
+  # module (its default blacklist already lists it), so the pen goes through OTD
+  # instead of libinput. The display MIRROR is unaffected (that is the GPU/DRM,
+  # not the pen driver); pen->screen mapping is set in OTD's output area. Needs a
+  # reboot for the blacklist to unload wacom. (Supersedes the earlier libwacom
+  # install -- with wacom blacklisted, linuxwacom's kernel path is unused.)
+  hardware.opentabletdriver.enable = true;
+
   /*
     Steam. programs.steam (not just the package) is required on NixOS: it wraps
     Steam in its FHS environment, pulls the 32-bit graphics/runtime libraries
@@ -56,9 +70,31 @@
     group = "users";
     dataDir = "/home/benjamin";
     configDir = "/home/benjamin/.config/syncthing";
+    # Open the firewall for sync (22000 tcp/udp) + local discovery (21027 udp),
+    # so direct/LAN peers connect without relaying. Tailscale peers (yulee) work
+    # regardless; this just covers the non-tailnet case.
+    openDefaultPorts = true;
     overrideDevices = false;
     overrideFolders = false;
   };
+
+  # Raise the inotify watch ceiling for Syncthing. Without enough watches a
+  # large synced folder can't be watched live and Syncthing falls back to slow
+  # periodic rescans. The common "204800" advice assumes the old ~8k default,
+  # but this kernel already scales it to 524288 by RAM -- so pin it HIGHER
+  # (1048576) to be a genuine increase, not a downgrade. It's only a ceiling;
+  # kernel memory is charged per watch actually taken (~1 KiB each).
+  boot.kernel.sysctl."fs.inotify.max_user_watches" = 1048576;
+
+  # Keyboard backlight auto-off: the EC turns it off after `stop_timeout` of no
+  # keyboard/touchpad input (default 10s -- too eager when reading). Bump to
+  # 2 min so it matches the screen's idle-dim. The dell driver encodes the value
+  # as 6 bits + a unit, so "2m" (not "120s", which overflows the 6-bit field).
+  # Applied on the led's `add` uevent so it survives reboots; the LED is a
+  # 3-level device (off/dim/bright), this only changes WHEN it auto-offs.
+  services.udev.extraRules = ''
+    ACTION=="add", SUBSYSTEM=="leds", KERNEL=="dell::kbd_backlight", ATTR{stop_timeout}="2m"
+  '';
 
   /*
     Caps Lock as the macOS-style language toggle.
@@ -339,6 +375,17 @@
       lazygit
       uv # fast Python package/project manager (Astral)
       bluetui # Bluetooth TUI; the waybar bluetooth icon opens it, also on PATH
+      gping # ping with a live latency graph (`gping <host>`, multi-host too)
+
+      # Handwritten-notes apps for the Wacom pen display (GoodNotes has no Linux
+      # build -- Apple/Windows only, and its Windows app is UWP so Wine can't run
+      # it). These are the GoodNotes-class Linux apps: rnote = modern infinite
+      # canvas; xournalpp = mature notebooks + strong PDF annotation. Both want
+      # pen PRESSURE, which needs OpenTabletDriver in Artist Mode (the OSK-tap
+      # trade-off from the wacom setup notes).
+      rnote
+      xournalpp
+      wvkbd # on-screen keyboard (wvkbd-mobintl); SUPER+O toggles it, see features/hyprland
 
       # Sonora, from its flake (prebuilt packages.default). Literal system
       # string, not pkgs.system: this list is also raw-imported by

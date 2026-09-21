@@ -21,6 +21,26 @@ let
     fi
   '';
 
+  # On-screen keyboard toggle (wvkbd): show it if hidden, hide it if shown.
+  # wvkbd speaks the zwp_virtual_keyboard protocol, so it types into ANY
+  # Wayland/XWayland app -- unlike an X11 OSK (onboard), which can only reach
+  # XWayland windows. It's a layer-shell overlay anchored to the bottom edge
+  # (floats above windows); no Wayland OSK is a real draggable window and still
+  # types into native apps, so this is the practical "floating keyboard". -x
+  # matches the exact process name so the toggle never signals itself. -L is the
+  # landscape height in px; ~30% of a 1080p panel gives finger/pen-sized keys.
+  wvkbdToggle = pkgs.writeShellScript "wvkbd-toggle" ''
+    export PATH=${lib.makeBinPath [ pkgs.wvkbd pkgs.procps pkgs.util-linux ]}:$PATH
+    if pgrep -x wvkbd-mobintl >/dev/null; then
+      pkill -x wvkbd-mobintl
+    else
+      # setsid -f: detach into its own session so it survives the launcher
+      # (waybar on-click / Hyprland exec) reaping this script's process group.
+      # A bare `&` gets killed with the parent group -- the "keyboard won't open".
+      setsid -f wvkbd-mobintl -L 320
+    fi
+  '';
+
   /*
     Run every my.hyprland.rotationHooks entry with the new transform.
 
@@ -592,6 +612,37 @@ in
         scale = "${osConfig.my.desktop.primaryOutputScale}",
       })
 
+      -- Wacom One 13 pen display: EXTEND to the right of the laptop panel (was
+      -- mirror). Matched by the DP port name, not desc: -- verified live that a
+      -- `desc:` selector is silently ignored through this hl.monitor Lua API
+      -- (returns "ok" but never matches), whereas "DP-1" applies cleanly. Both
+      -- panels are 1920x1080 @ scale 1, so auto-right lands it flush at 1920,0.
+      -- Pen mapping in extend mode is OTD's job: set its output area to the Wacom
+      -- screen (Artist Mode auto-maps a pen display; Absolute Mode needs the
+      -- display area dragged onto DP-1). Harmless when nothing is on DP-1.
+      hl.monitor({
+        output = "DP-1",
+        mode = "preferred",
+        position = "auto-right",
+        scale = 1,
+      })
+
+      -- Confine the pen to the Wacom (DP-1) at the COMPOSITOR level. On a
+      -- multi-monitor Wayland desktop, letting OTD target a specific monitor via
+      -- its own Display area fights Hyprland (OTD's coords land outside the range
+      -- Hyprland maps the virtual tablet to, so X saturates -- "stuck to the
+      -- right"). input:tablet:output makes Hyprland do the monitor mapping, so
+      -- OTD just maps the full tablet 1:1 and Hyprland puts it on DP-1. Works in
+      -- mirror too (DP-1 sits at 0,0 there). Pair with OTD Artist Mode, whose
+      -- virtual tablet is 16:9 like the panel, for a clean no-distortion 1:1.
+      hl.config({ input = { tablet = { output = "DP-1" } } })
+
+      -- Keep the on-screen keyboard (wvkbd) at the very top of the overlay level,
+      -- above other overlay surfaces like the rofi launcher, so its keys stay
+      -- tappable while a launcher/menu is open. Verified via screenshot with rofi
+      -- up. `order` is Hyprland's within-level z hint; higher = closer to the top.
+      hl.layer_rule({ match = "wvkbd", order = 999 })
+
       -- iio-hyprland: reads iio-sensor-proxy orientation over D-Bus, rotates the
       -- eDP-1 output and touch input transform automatically (accel_3d + hinge
       -- sensors confirmed present via /sys/bus/iio/devices; enabled in hardware.nix).
@@ -719,19 +770,24 @@ in
       hl.bind(mod .. " + W", hl.dsp.exec_cmd("firefox"))
       hl.bind(mod .. " + B", hl.dsp.exec_cmd("dolphin"))
       hl.bind(mod .. " + E", hl.dsp.exec_cmd("emacsclient -c"))
+      -- On-screen keyboard: toggle the wvkbd overlay (handy with the Wacom pen).
+      hl.bind(mod .. " + O", hl.dsp.exec_cmd("${wvkbdToggle}"))
       -- Compositor-level IME toggle, same logic as niri.nix's Hangul bind.
       hl.bind("Hangul", hl.dsp.exec_cmd("${hangulToggle}"))
 
       -- Laptop Fn media keys. The keys emit XF86 keysyms; nothing was bound to
       -- them, so they did nothing. Global (no mod), locked = true so they work
-      -- on the lock screen, and ["repeat"] = true (quoted -- `repeat` is a Lua
-      -- keyword) so holding ramps. wpctl (wireplumber) for audio, brightnessctl
-      -- for backlight; volume capped at 100% (-l 1.0).
+      -- on the lock screen, and repeating = true so HOLDING ramps. NOTE: the
+      -- hold-to-ramp flag is `repeating`, NOT `repeat` -- this was written as
+      -- ["repeat"] = true (guessing the Lua keyword needed quoting), which
+      -- hl.bind silently ignores, so the keys quietly stopped ramping and only
+      -- stepped once per press. wpctl (wireplumber) for audio, brightnessctl for
+      -- backlight; volume capped at 100% (-l 1.0).
       hl.bind("XF86AudioMute", hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"), { locked = true })
-      hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%-"), { locked = true, ["repeat"] = true })
-      hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"), { locked = true, ["repeat"] = true })
-      hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("brightnessctl set 5%-"), { locked = true, ["repeat"] = true })
-      hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, ["repeat"] = true })
+      hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%-"), { locked = true, repeating = true })
+      hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"), { locked = true, repeating = true })
+      hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("brightnessctl set 5%-"), { locked = true, repeating = true })
+      hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, repeating = true })
 
       -- Window management
       hl.bind(mod .. " + Q", hl.dsp.window.close())

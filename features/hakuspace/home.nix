@@ -8,6 +8,34 @@ let
   bin = name: "${config.home.homeDirectory}/.local/bin/${name}";
 
   /*
+    Keep the PREVIOUS Hyprland session's log across a reboot. Hyprland writes to
+    $XDG_RUNTIME_DIR/hypr/<instance>/hyprland.log -- tmpfs, wiped on reboot -- so
+    a freeze that forces a hard power-off destroys the very log that would
+    explain it. This mirrors the live log to disk as it is written and, on each
+    session start, rotates the last capture to `previous.log`. After a
+    freeze+reboot, previous.log holds the frozen session up to the instant it
+    locked. Line-buffered (stdbuf) so the final lines actually reach the platter;
+    `tail -F --retry` waits for the log to appear as the session comes up, and a
+    short poll finds the newest instance dir.
+  */
+  hyprlandLogKeeper = pkgs.writeShellScript "hakuspace-hyprland-log-keep" ''
+    export PATH=${lib.makeBinPath [ pkgs.coreutils ]}:$PATH
+    state="$HOME/.local/state/hyprland"
+    mkdir -p "$state"
+    [ -f "$state/current.log" ] && mv -f "$state/current.log" "$state/previous.log"
+    : > "$state/current.log"
+    rt="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr"
+    live=""
+    for _ in $(seq 50); do
+      live=$(ls -1t "$rt"/*/hyprland.log 2>/dev/null | head -1)
+      [ -n "$live" ] && break
+      sleep 0.2
+    done
+    [ -z "$live" ] && exit 0
+    exec stdbuf -oL tail -n +1 -F --retry "$live" >> "$state/current.log"
+  '';
+
+  /*
     One shape per component, because they all want the same lifecycle: tied to
     graphical-session.target, started after it, stopped with it.
 
@@ -458,6 +486,10 @@ in
       hakuspace-clipboard-image = service "Haku Space clipboard history (images)"
         "${pkgs.wl-clipboard}/bin/wl-paste --type image --watch ${pkgs.cliphist}/bin/cliphist store";
 
+      # Mirror Hyprland's (tmpfs, reboot-wiped) log to disk, keeping the previous
+      # session's copy so a freeze-forced hard power-off leaves a trace to read.
+      hakuspace-hyprland-log = service "Haku Space Hyprland log keeper" hyprlandLogKeeper;
+
       /*
         waybar_manager.sh, not waybar, and oneshot rather than a supervised
         service. The script is what decides WHICH layout is live: it symlinks
@@ -902,17 +934,102 @@ in
             r = lib.foldl' step { drop = false; out = [ ]; } (lib.splitString "\n" text);
           in
           lib.concatStringsSep "\n" r.out;
-        hyprlockNoText =
-          name:
-          builtins.toFile "${name}-notext" (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}"));
+        # Battery + now-playing widgets for the MAIN lock screen (not the tiny
+        # variant). Dynamic hyprlock labels: battery reads sysfs every 30s;
+        # now-playing polls playerctl every 2s and is simply blank when nothing
+        # is playing (playerctl exits non-zero -> empty stdout). Positions are
+        # offsets from screen centre (y+ is up, per the stock clock/date stack):
+        # battery sits above the clock, the track line below the password field.
+        hyprlockExtras = ''
 
-        # Dim to 10% ONLY when currently above 15% -- so a re-fire while
-        # already dim never saves 10 as the restore point. brightnessctl -m
-        # prints name,type,current,percent,max; field 4 is the percent.
-        dimGuard = pkgs.writeShellScript "hakuspace-idle-dim" ''
-          pct=$(brightnessctl -m | ${pkgs.gnused}/bin/sed -E 's/([^,]*,){3}([0-9]+)%.*/\2/')
-          [ "''${pct:-0}" -gt 15 ] && exec brightnessctl -s set 10
-          exit 0
+          label {
+              monitor =
+              text = cmd[update:30000] echo "$(cat /sys/class/power_supply/BAT0/capacity)% · $(cat /sys/class/power_supply/BAT0/status)"
+              color = rgba(255, 255, 255, 0.7)
+              font_size = 16
+              position = 0, 330
+              halign = center
+              valign = center
+          }
+
+          label {
+              monitor =
+              text = cmd[update:2000] playerctl metadata --format "{{artist}} - {{title}}" 2>/dev/null
+              color = $accent_color
+              font_size = 15
+              position = 0, -330
+              halign = center
+              valign = center
+          }
+        '';
+        hyprlockNoText =
+          name: extra:
+          builtins.toFile "${name}-notext" (
+            # Also swap the password-box placeholder: upstream ships the cutesy
+            # "<i> Use Me ;) </i>", which is not it. replaceStrings is a no-op on
+            # a file that lacks the string (e.g. hyprlock_tiny.conf). `extra` is
+            # appended verbatim (extra label blocks for the main lock only).
+            (builtins.replaceStrings
+              [ "<i> Use Me ;) </i>" ]
+              [ "<i>Enter password</i>" ]
+              (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}")))
+            + extra
+          );
+
+        # Idle dim: FADE the backlight down to 10% over ~1s, cancellable. Two
+        # fixes over the old one-liner (`brightnessctl -s set 10`): that `10`
+        # was a RAW value (~0% of a 120000 max), not 10% -- hence "dims to 0";
+        # and it was instant. Now:
+        #   - only act when currently >15% (never re-dim, never save 10% as the
+        #     restore point). brightnessctl -m = name,type,current,percent,max.
+        #   - `-s` first, so on-resume's `-r` restores the pre-dim level (shared
+        #     with the dpms/suspend restore path, kept consistent).
+        #   - fade in 20 steps of 50ms to 10% of max; write the pid so the
+        #     resume script can kill the fade mid-way if input arrives inside 1s.
+        dimFade = pkgs.writeShellScript "hakuspace-idle-dim" ''
+          export PATH=${lib.makeBinPath [ pkgs.brightnessctl pkgs.coreutils ]}:$PATH
+
+          # Keyboard backlight mirrors the screen's two states: DIM (level 1) while
+          # the screen is dimmed, FULL (max) when active (restored below). Matches
+          # any *kbd_backlight LED; no-op on hosts/keyboards without one.
+          kbd=""
+          for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
+          [ -n "$kbd" ] && brightnessctl -d "$kbd" set 1 >/dev/null 2>&1
+
+          pidfile="''${XDG_RUNTIME_DIR:-/tmp}/hakuspace-dim.pid"
+          [ -r "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
+          echo $$ > "$pidfile"
+          info=$(brightnessctl -m)
+          cur=$(echo "$info" | cut -d, -f3)
+          pct=$(echo "$info" | cut -d, -f4 | tr -d %)
+          max=$(echo "$info" | cut -d, -f5)
+          if [ "''${pct:-0}" -le 15 ]; then rm -f "$pidfile"; exit 0; fi
+          brightnessctl -s >/dev/null
+          target=$(( max / 10 ))
+          steps=20
+          i=1
+          while [ "$i" -le "$steps" ]; do
+            brightnessctl -q set "$(( cur - (cur - target) * i / steps ))"
+            sleep 0.05
+            i=$(( i + 1 ))
+          done
+          brightnessctl -q set "$target"
+          rm -f "$pidfile"
+        '';
+
+        # Idle over: kill an in-progress fade, then jump straight back to the
+        # pre-dim level (brightnessctl -r). If the fade already finished, there
+        # is no pid to kill and -r just restores.
+        dimRestore = pkgs.writeShellScript "hakuspace-idle-undim" ''
+          export PATH=${lib.makeBinPath [ pkgs.brightnessctl pkgs.coreutils ]}:$PATH
+          pidfile="''${XDG_RUNTIME_DIR:-/tmp}/hakuspace-dim.pid"
+          [ -r "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile"
+          brightnessctl -q -r
+
+          # Keyboard backlight back to FULL (max) now the screen is active again.
+          kbd=""
+          for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
+          [ -n "$kbd" ] && brightnessctl -d "$kbd" set 100% >/dev/null 2>&1
         '';
 
         /*
@@ -947,10 +1064,15 @@ in
           cp ${pkgHypr}/hypridle.conf $out
           chmod u+w $out
 
-          # (1) never dim -- and never save a restore point -- when already dim.
+          # (1) fade to 10% over ~1s (cancellable), and never dim -- nor save a
+          # restore point -- when already dim; on-resume kills any in-progress
+          # fade and jumps back to the pre-dim level.
           substituteInPlace $out \
             --replace-fail 'on-timeout = brightnessctl -s set 10' \
-              'on-timeout = ${dimGuard}'
+              'on-timeout = ${dimFade}'
+          substituteInPlace $out \
+            --replace-fail 'on-resume = brightnessctl -r' \
+              'on-resume = ${dimRestore}'
 
           # (2) save around the suspend the lid triggers, restore on wake.
           substituteInPlace $out \
@@ -976,8 +1098,8 @@ in
       in
       {
         ".config/hypr/hypridle.conf".source = hypridleFixed;
-        ".config/hypr/hyprlock.conf".source = hyprlockNoText "hyprlock.conf";
-        ".config/hypr/hyprlock_tiny.conf".source = hyprlockNoText "hyprlock_tiny.conf";
+        ".config/hypr/hyprlock.conf".source = hyprlockNoText "hyprlock.conf" hyprlockExtras;
+        ".config/hypr/hyprlock_tiny.conf".source = hyprlockNoText "hyprlock_tiny.conf" "";
       };
   };
 }
