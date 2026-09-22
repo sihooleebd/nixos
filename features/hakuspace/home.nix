@@ -934,47 +934,209 @@ in
             r = lib.foldl' step { drop = false; out = [ ]; } (lib.splitString "\n" text);
           in
           lib.concatStringsSep "\n" r.out;
-        # Battery + now-playing widgets for the MAIN lock screen (not the tiny
-        # variant). Dynamic hyprlock labels: battery reads sysfs every 30s;
-        # now-playing polls playerctl every 2s and is simply blank when nothing
-        # is playing (playerctl exits non-zero -> empty stdout). Positions are
-        # offsets from screen centre (y+ is up, per the stock clock/date stack):
-        # battery sits above the clock, the track line below the password field.
+        # Battery + now-playing for the MAIN lock, placed on the RIGHT (the stock
+        # clock/date/input get flipped to the LEFT by `toLeft` below). Dynamic
+        # hyprlock labels: battery reads sysfs every 30s; now-playing polls
+        # Lock-screen music widgets, each a SCRIPT the label calls by store path.
+        # Why scripts: hyprlock uses hyprlang, which chokes on three things in a
+        # value -- `{{ }}` (its math-expression syntax; THIS was the long "Sample
+        # Text" bug via playerctl --format), `${ }` (its variables), and `{ }`
+        # (category delimiters). A bare script path has none of those, and the
+        # script can then use awk/`${ }`/`{ }` freely. Each script ALWAYS prints
+        # non-empty text -- `general { text_trim = true }` collapses whitespace to
+        # empty, which hyprlock renders as "Sample Text". These only DISPLAY;
+        # control is the locked media keybinds in features/hyprland (hyprlock has
+        # no clickable widgets).
+        lockMusicSong = pkgs.writeShellScript "lock-music-song" ''
+          export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.coreutils pkgs.gnugrep ]}:$PATH
+          if playerctl metadata title 2>/dev/null | grep -q .; then
+            printf '%s - %s' "$(playerctl metadata artist 2>/dev/null)" "$(playerctl metadata title 2>/dev/null)"
+          else
+            printf 'No music playing'
+          fi
+        '';
+        # ONLY the play/pause glyph (single char). prev/next are static labels
+        # drawn independently, so this glyph changing width (▶ vs ⏸) never shifts
+        # them -- it's halign=center, so ▶<->⏸ just re-centres in place.
+        lockMusicPlayPause = pkgs.writeShellScript "lock-music-playpause" ''
+          export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gnugrep ]}:$PATH
+          if playerctl status 2>/dev/null | grep -q Playing; then
+            printf '⏸'
+          else
+            printf '▶'
+          fi
+        '';
+        lockMusicPosition = pkgs.writeShellScript "lock-music-position" ''
+          export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gawk pkgs.coreutils ]}:$PATH
+          p=$(playerctl position 2>/dev/null)
+          l=$(playerctl metadata mpris:length 2>/dev/null)
+          exec awk -v p="$p" -v l="$l" 'BEGIN{
+            ls = l/1000000
+            em = int(p/60); es = int(p)%60
+            if (ls > 0) {
+              n = 18; f = int((p/ls)*n); if (f>n) f=n
+              bar = ""; for (i=0;i<n;i++) bar = bar (i<f ? "━" : (i==f ? "●" : "─"))
+              printf "%d:%02d  %s  %d:%02d", em, es, bar, int(ls/60), int(ls)%60
+            } else printf "%d:%02d", em, es
+          }'
+        '';
+        lockMusicVolume = pkgs.writeShellScript "lock-music-volume" ''
+          export PATH=${lib.makeBinPath [ pkgs.wireplumber pkgs.gawk ]}:$PATH
+          line=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
+          [ -z "$line" ] && { printf '🔊 ------------ --'; exit 0; }
+          printf '%s' "$line" | awk '{
+            v = $2; muted = ($0 ~ /MUTED/)
+            pct = int(v*100); n = 12; f = int(v*n); if (f>n) f=n
+            bar = ""; for (i=0;i<n;i++) bar = bar (i<f ? "▓" : "░")
+            if (muted) printf "🔇 %s muted", bar
+            else printf "🔊 %s %d%%", bar, pct
+          }'
+        '';
+
+        # Lock-screen weather: a compact linecast line, CACHED so the label reads
+        # instantly and the network fetch runs in the background at most every
+        # 30 min. The display script only cats the cache (and kicks off a detached
+        # refresh when it's missing/stale) -- it never blocks the label on the
+        # network. linecast lives in the user profile, not pkgs, so it resolves
+        # off the inherited session PATH (kept as the tail of PATH here).
+        lockWeatherFetch = pkgs.writeShellScript "lock-weather-fetch" ''
+          export PATH=${lib.makeBinPath [ pkgs.jq pkgs.coreutils ]}:$PATH
+          out=$(linecast weather --json --print 2>/dev/null \
+            | jq -r '"\(.current.icon)  \(.current.temperature|round)°   \(.current.condition)    H\(.today.high|round)°  L\(.today.low|round)°"' 2>/dev/null)
+          [ -n "$out" ] && printf '%s' "$out" > "$HOME/.cache/lock-weather"
+        '';
+        lockWeather = pkgs.writeShellScript "lock-weather" ''
+          export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.findutils pkgs.util-linux ]}:$PATH
+          cache="$HOME/.cache/lock-weather"
+          mkdir -p "$(dirname "$cache")"
+          if [ ! -s "$cache" ] || [ -n "$(find "$cache" -mmin +30 2>/dev/null)" ]; then
+            touch "$cache" 2>/dev/null            # reset the 30-min timer so a failed/slow fetch is not retried every poll
+            setsid -f ${lockWeatherFetch} >/dev/null 2>&1 || true
+          fi
+          if [ -s "$cache" ]; then cat "$cache"; else printf '  …'; fi
+        '';
+
+        # Right-hand column: battery on top, then the music cluster (song, the
+        # transport row, position bar, volume bar). All halign=right, inset 120px
+        # to mirror the left pill's margin; y+ is up. The battery/song keep the
+        # theme font; the bar rows use plain font for even glyph spacing.
         hyprlockExtras = ''
 
           label {
               monitor =
-              text = cmd[update:30000] echo "$(cat /sys/class/power_supply/BAT0/capacity)% · $(cat /sys/class/power_supply/BAT0/status)"
-              color = rgba(255, 255, 255, 0.7)
-              font_size = 16
-              position = 0, 330
+              text = cmd[update:10000] ${lockWeather}
+              color = rgba(255, 255, 255, 0.65)
+              font_size = 15
+              font_family = $font_family extraBold
+              position = -630, 258
               halign = center
               valign = center
+              zindex = 5
           }
 
           label {
               monitor =
-              text = cmd[update:2000] playerctl metadata --format "{{artist}} - {{title}}" 2>/dev/null
+              text = cmd[update:1000] echo "$(cat /sys/class/power_supply/BAT0/capacity)% · $(cat /sys/class/power_supply/BAT0/status)"
+              color = rgba(255, 255, 255, 0.7)
+              font_size = 16
+              font_family = $font_family extraBold
+              position = -120, 150
+              halign = right
+              valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = cmd[update:1000] ${lockMusicSong}
               color = $accent_color
-              font_size = 15
-              position = 0, -330
+              font_size = 16
+              font_family = $font_family extraBold
+              position = -120, 55
+              halign = right
+              valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = ⏮
+              color = rgba(255, 255, 255, 0.9)
+              font_size = 20
+              position = 700, 8
               halign = center
               valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = cmd[update:250] ${lockMusicPlayPause}
+              color = rgba(255, 255, 255, 0.9)
+              font_size = 20
+              position = 760, 8
+              halign = center
+              valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = ⏭
+              color = rgba(255, 255, 255, 0.9)
+              font_size = 20
+              position = 820, 8
+              halign = center
+              valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = cmd[update:500] ${lockMusicPosition}
+              color = rgba(255, 255, 255, 0.55)
+              font_size = 13
+              position = -120, -35
+              halign = right
+              valign = center
+              zindex = 5
+          }
+
+          label {
+              monitor =
+              text = cmd[update:250] ${lockMusicVolume}
+              color = rgba(255, 255, 255, 0.55)
+              font_size = 14
+              position = -120, -80
+              halign = right
+              valign = center
+              zindex = 5
           }
         '';
+        # Move the stock centred widgets (clock, date, input, backdrop pill) to
+        # the LEFT while KEEPING halign=center, so each stays centred WITHIN the
+        # pill instead of flush to its edge. Only the X shifts. -630 puts the
+        # 420-wide pill's LEFT edge at 960-630-210 = 120px from the screen edge --
+        # matching the battery/music RIGHT margin (halign=right, position=-120 ->
+        # 120px from the right edge), so both sides are inset equally. Applied
+        # only to the main lock (the one with `extra`); the tiny variant is stock.
+        toLeft = builtins.replaceStrings [ "position = 0," ] [ "position = -630," ];
         hyprlockNoText =
           name: extra:
-          builtins.toFile "${name}-notext" (
+          let
             # Also swap the password-box placeholder: upstream ships the cutesy
             # "<i> Use Me ;) </i>", which is not it. replaceStrings is a no-op on
-            # a file that lacks the string (e.g. hyprlock_tiny.conf). `extra` is
-            # appended verbatim (extra label blocks for the main lock only).
-            (builtins.replaceStrings
+            # a file that lacks the string (e.g. hyprlock_tiny.conf).
+            base = builtins.replaceStrings
               [ "<i> Use Me ;) </i>" ]
               [ "<i>Enter password</i>" ]
-              (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}")))
-            + extra
-          );
+              (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}"));
+          in
+          # writeText, NOT builtins.toFile: `extra` now interpolates script store
+          # paths (the music widgets), and toFile forbids derivation references.
+          # writeText builds locally (trivial) -- no remote builder needed.
+          pkgs.writeText "${name}-notext"
+            ((if extra == "" then base else toLeft base) + extra);
 
         # Idle dim: FADE the backlight down to 10% over ~1s, cancellable. Two
         # fixes over the old one-liner (`brightnessctl -s set 10`): that `10`

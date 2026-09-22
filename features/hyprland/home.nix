@@ -789,6 +789,20 @@ in
       hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("brightnessctl set 5%-"), { locked = true, repeating = true })
       hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd("brightnessctl set 5%+"), { locked = true, repeating = true })
 
+      -- Media transport, locked = true so it drives playback FROM THE LOCK SCREEN
+      -- too (the hyprlock music widget reflects the new state on its next poll).
+      -- XF86 keys for keyboards that emit them; SUPER combos as the reliable
+      -- lock-screen fallback -- SUPER+P = play/pause, SUPER+[ / ] = prev / next.
+      -- NOT SUPER+space: that is the app-menu launcher in the unlocked compositor,
+      -- and a locked = true bind fires unlocked too, so it would collide.
+      -- playerctl resolves on the compositor's PATH, same as wpctl.
+      hl.bind("XF86AudioPlay", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
+      hl.bind("XF86AudioNext", hl.dsp.exec_cmd("playerctl next"), { locked = true })
+      hl.bind("XF86AudioPrev", hl.dsp.exec_cmd("playerctl previous"), { locked = true })
+      hl.bind(mod .. " + P", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
+      hl.bind(mod .. " + bracketright", hl.dsp.exec_cmd("playerctl next"), { locked = true })
+      hl.bind(mod .. " + bracketleft", hl.dsp.exec_cmd("playerctl previous"), { locked = true })
+
       -- Window management
       hl.bind(mod .. " + Q", hl.dsp.window.close())
       hl.bind(mod .. " + F", hl.dsp.window.fullscreen({ mode = "fullscreen" }))
