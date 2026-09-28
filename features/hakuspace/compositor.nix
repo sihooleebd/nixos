@@ -38,6 +38,35 @@ let
     bind silently show an empty mode list.
   */
   rofi = pkgs.rofi.override { plugins = [ pkgs.rofi-emoji ]; };
+
+  # Toggle a rofi surface: a second press closes it instead of erroring "Rofi
+  # already running". Both the drun launcher (SUPER+Space) and hakumenu
+  # (SUPER+Tab, itself `rofi -show` with custom modes) are rofi, so one check
+  # serves both -- pass the launch command as arguments. pgrep/pkill cover both
+  # the bare `rofi` comm and the `.rofi-wrapped` name the plugin override may
+  # produce.
+  rofiToggle = pkgs.writeShellScript "rofi-toggle" ''
+    if ${pkgs.procps}/bin/pgrep -x rofi >/dev/null 2>&1 \
+      || ${pkgs.procps}/bin/pgrep -x .rofi-wrapped >/dev/null 2>&1; then
+      ${pkgs.procps}/bin/pkill -x rofi 2>/dev/null || true
+      ${pkgs.procps}/bin/pkill -x .rofi-wrapped 2>/dev/null || true
+    else
+      exec "$@"
+    fi
+  '';
+
+  # Panic gesture (SUPER+SHIFT+Escape): lock the screen INSTANTLY, then SIGKILL
+  # every app window behind the lock. Lock first (setsid -f so it outlives this
+  # script) so the screen is covered before anything else happens; then kill --
+  # panic means the windows go NOW, no graceful close / save prompts. hyprlock
+  # and waybar are layer surfaces, not clients, so `hyprctl clients` never lists
+  # them and they survive. PIDs 0/-1 (xwayland-internal) are filtered out.
+  panic = pkgs.writeShellScript "panic-mode" ''
+    ${pkgs.util-linux}/bin/setsid -f ${bin "lock.sh"} >/dev/null 2>&1 || true
+    pids=$(${pkgs.hyprland}/bin/hyprctl clients -j 2>/dev/null \
+      | ${pkgs.jq}/bin/jq -r '.[].pid' | ${pkgs.gnugrep}/bin/grep -vxE '0|-1')
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+  '';
 in
 {
   config = lib.mkIf (enabled && compositor == "hyprland") {
@@ -50,9 +79,9 @@ in
       -- column AND open the launcher on one press. Same collision class as
       -- the W / SHIFT+P moves documented below, but these three were only
       -- caught live: registration order reports nothing.
-      hl.bind("${mod} + space", hl.dsp.exec_cmd("${rofi}/bin/rofi -show drun"))
+      hl.bind("${mod} + space", hl.dsp.exec_cmd("${rofiToggle} ${rofi}/bin/rofi -show drun"))
       hl.bind("${mod} + slash", hl.dsp.exec_cmd("${rofi}/bin/rofi -modi emoji -show emoji"))
-      hl.bind("${mod} + Tab", hl.dsp.exec_cmd("${bin "hakumenu.sh"}"))
+      hl.bind("${mod} + Tab", hl.dsp.exec_cmd("${rofiToggle} ${bin "hakumenu.sh"}"))
       hl.bind("${mod} + N", hl.dsp.exec_cmd("${pkgs.swaynotificationcenter}/bin/swaync-client -t -sw"))
       hl.bind("${mod} + V", hl.dsp.exec_cmd("${bin "clipboard_menu.sh"}"))
       hl.bind("${mod} + SHIFT + V", hl.dsp.exec_cmd("${bin "clipboard_menu.sh"} --wipe"))
@@ -61,6 +90,9 @@ in
       -- locking the screen while switching workspaces); SHIFT+L, not
       -- upstream's L (mod+L is focus right).
       hl.bind("${mod} + Escape", hl.dsp.exec_cmd("${bin "lock.sh"}"), { locked = true })
+      -- Panic: kill every window + lock, one gesture. Sits next to the lock bind
+      -- on purpose (SUPER+Escape locks, SUPER+SHIFT+Escape nukes + locks).
+      hl.bind("${mod} + SHIFT + Escape", hl.dsp.exec_cmd("${panic}"))
       hl.bind("${mod} + SHIFT + L", hl.dsp.exec_cmd("${bin "nightlight_toggle.sh"}"))
 
       -- Appearance: wallpaper, the cava underbar, and the bar layout cycle.
@@ -103,7 +135,11 @@ in
       -- features/hyprland enables compositor-side. A layer surface has to opt
       -- into blur; only windows get it automatically.
       hl.layer_rule({ match = { namespace = "^(waybar)$" }, blur = true, ignore_alpha = 0.05 })
-      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true, ignore_alpha = 0.05 })
+      -- rofi also gets dim_around: it darkens everything AROUND the launcher
+      -- surface (strength = decoration:dim_around in features/hyprland), so the
+      -- apps behind sink into a blurred, dimmed backdrop instead of staying
+      -- legible next to the selector.
+      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true, ignore_alpha = 0.05, dim_around = true })
       hl.layer_rule({ match = { namespace = "^(swaync.*)$" }, blur = true, ignore_alpha = 0.05 })
     '';
   };

@@ -180,6 +180,9 @@
     locale.enable = true;
     firefox.enable = true;
     fcitx.enable = true;
+    # KakaoTalk via Wine -- Korean fonts + ko_KR locale, Daum ad-block, and the
+    # XEmbed->SNI tray bridge. (galaxybook runs it via Waydroid instead.)
+    kakaotalk.enable = true;
     openvpn.enable = true;
     waydroid = {
       enable = true;

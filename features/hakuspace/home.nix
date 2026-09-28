@@ -982,14 +982,19 @@ in
         '';
         lockMusicVolume = pkgs.writeShellScript "lock-music-volume" ''
           export PATH=${lib.makeBinPath [ pkgs.wireplumber pkgs.gawk ]}:$PATH
+          # Nerd Font (DepartureMono NF) volume glyphs -- built with bash printf so
+          # the private-use codepoints stay out of the source, and passed to awk as
+          # vars (awk has no \u escape). No more lone emoji on the lock screen.
+          vol=$(printf '\uf028')   # nf-fa-volume-up
+          mut=$(printf '\uf026')   # nf-fa-volume-off (muted)
           line=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
-          [ -z "$line" ] && { printf '🔊 ------------ --'; exit 0; }
-          printf '%s' "$line" | awk '{
+          [ -z "$line" ] && { printf '%s   ------------ --' "$vol"; exit 0; }
+          printf '%s' "$line" | awk -v vol="$vol" -v mut="$mut" '{
             v = $2; muted = ($0 ~ /MUTED/)
             pct = int(v*100); n = 12; f = int(v*n); if (f>n) f=n
             bar = ""; for (i=0;i<n;i++) bar = bar (i<f ? "▓" : "░")
-            if (muted) printf "🔇 %s muted", bar
-            else printf "🔊 %s %d%%", bar, pct
+            if (muted) printf "%s   %s muted", mut, bar
+            else printf "%s   %s %d%%", vol, bar, pct
           }'
         '';
 
@@ -1028,8 +1033,8 @@ in
               color = rgba(255, 255, 255, 0.65)
               font_size = 15
               font_family = $font_family extraBold
-              position = -630, 258
-              halign = center
+              position = -120, -150
+              halign = right
               valign = center
               zindex = 5
           }
@@ -1040,7 +1045,7 @@ in
               color = rgba(255, 255, 255, 0.7)
               font_size = 16
               font_family = $font_family extraBold
-              position = -120, 150
+              position = -120, 125
               halign = right
               valign = center
               zindex = 5
@@ -1096,6 +1101,7 @@ in
               text = cmd[update:500] ${lockMusicPosition}
               color = rgba(255, 255, 255, 0.55)
               font_size = 13
+              font_family = $font_family
               position = -120, -35
               halign = right
               valign = center
@@ -1107,6 +1113,7 @@ in
               text = cmd[update:250] ${lockMusicVolume}
               color = rgba(255, 255, 255, 0.55)
               font_size = 14
+              font_family = $font_family
               position = -120, -80
               halign = right
               valign = center

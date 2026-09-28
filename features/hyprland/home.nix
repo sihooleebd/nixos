@@ -380,6 +380,13 @@ in
 
         decoration = {
           rounding = 16;
+          # Strength of the darkening a `dim_around` layer/window rule casts over
+          # the rest of the screen. The shell's rofi layer opts in
+          # (features/hakuspace/compositor.nix) so the launcher + hakumenu hide the
+          # apps behind them; 0.45 leans on the blur to do the hiding and only
+          # tints, rather than blacking out. No effect where no dim_around rule
+          # is active.
+          dim_around = 0.45;
           # Glassmorphism: true backdrop blur behind translucent surfaces.
           # Compositor-side half only. Blur applies to translucent WINDOWS
           # automatically, but a layer surface has to opt in with a
@@ -747,6 +754,13 @@ in
       hl.window_rule({ match = { class = "^(com\\.github\\.wwmm\\.easyeffects)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(wdisplays)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(qt6ct)$" }, float = true, center = true })
+      -- KakaoTalk (Wine) opens as a floating window. Class is the exe basename.
+      hl.window_rule({ match = { class = "^(kakaotalk\\.exe)$" }, float = true })
+      -- xembedsniproxy's XEmbed host container is a 32x32 X11 window it reparents
+      -- Wine's tray icon into. KDE keeps it off-screen; Hyprland maps it as a tiny
+      -- black dot at 0,0. It must stay MAPPED for the embed to work, so don't kill
+      -- it -- just float it out of the tiling flow and make it fully transparent.
+      hl.window_rule({ match = { class = "^(xembedsniproxy)$" }, float = true, opacity = "0.0 0.0" })
       hl.window_rule({ match = { class = "^(org\\.kde\\.systemsettings)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(xdg-desktop-portal-.*)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(io\\.github\\.Qalculate\\.qalculate-qt)$" }, float = true, center = true })
