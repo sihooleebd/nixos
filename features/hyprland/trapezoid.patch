@@ -1,0 +1,220 @@
+diff -ruN a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+--- a/src/config/values/ConfigValues.cpp	2026-09-29 10:06:01.808557155 +0900
++++ b/src/config/values/ConfigValues.cpp	2026-09-29 10:06:25.252128247 +0900
+@@ -201,6 +201,10 @@
+                 {.min = 0, .max = 20, .refresh = Supplementary::REFRESH_WINDOW_STATES | Supplementary::REFRESH_BLUR_FB}),
+         MS<Float>("decoration:rounding_power", "rounding power of corners (2 is a circle)", 2,
+                   {.min = 2, .max = 10, .refresh = Supplementary::REFRESH_WINDOW_STATES | Supplementary::REFRESH_BLUR_FB}),
++        MS<Float>("decoration:keystone_inset", "dock keystone: left-edge horizontal inset fraction (0 = off)", 0.f,
++                  {.min = 0.f, .max = 0.5f}),
++        MS<Float>("decoration:keystone_shrink", "dock keystone: left-edge vertical shrink fraction (0 = off)", 0.f,
++                  {.min = 0.f, .max = 0.5f}),
+         MS<Float>("decoration:active_opacity", "opacity of active windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
+         MS<Float>("decoration:inactive_opacity", "opacity of inactive windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
+         MS<Float>("decoration:fullscreen_opacity", "opacity of fullscreen windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
+diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTester.cpp
+--- a/src/desktop/state/ViewHitTester.cpp	2026-09-29 10:06:01.810869540 +0900
++++ b/src/desktop/state/ViewHitTester.cpp	2026-09-29 10:41:39.716426927 +0900
+@@ -254,6 +254,56 @@
+     return windowForWorkspace(false);
+ }
+ 
++// Dock keystone (input side): the renderer warps dock-tagged windows into a
++// perspective trapezoid via a homography H (OpenGL.cpp ksDockKeystone). Input
++// still hits the rectangular surface, so a tap on the visible trapezoid would
++// land at the wrong surface point. Undo it: map the box-relative hit through
++// H^-1, so pointer / touch / pen-as-pointer follow the transformed window. Same
++// inset/shrink config as the renderer; identity for any non-dock/un-tuned window.
++static Vector2D ksHitInverse(const PHLWINDOW& window, Vector2D rel) {
++    if (!window->m_ruleApplicator || !window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++        return rel;
++    static auto PINSET  = CConfigValue<Config::FLOAT>("decoration:keystone_inset");
++    static auto PSHRINK = CConfigValue<Config::FLOAT>("decoration:keystone_shrink");
++    const float inset = *PINSET, shrink = *PSHRINK;
++    if (inset <= 0.0001f && shrink <= 0.0001f)
++        return rel;
++    const Vector2D sz = window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
++    if (sz.x <= 0 || sz.y <= 0)
++        return rel;
++    // forward homography H (unit square -> trapezoid), identical to the renderer
++    const float x0 = inset, y0 = shrink, x1 = 1.0f, y1 = 0.0f, x2 = 1.0f, y2 = 1.0f, x3 = inset, y3 = 1.0f - shrink;
++    const float sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
++    const float dx1 = x1 - x2, dx2 = x3 - x2, dy1 = y1 - y2, dy2 = y3 - y2;
++    const float den = dx1 * dy2 - dx2 * dy1;
++    if (den == 0.0f)
++        return rel;
++    const float g = (sx * dy2 - sy * dx2) / den;
++    const float h = (dx1 * sy - dy1 * sx) / den;
++    const float a = x1 - x0 + g * x1, b = x3 - x0 + h * x3, c = x0;
++    const float d = y1 - y0 + g * y1, e = y3 - y0 + h * y3, ff = y0;
++    const float i = 1.0f;
++    // inverse of H (adjugate / determinant)
++    const float det = a * (e * i - ff * h) - b * (d * i - ff * g) + c * (d * h - e * g);
++    if (det == 0.0f)
++        return rel;
++    const float ia = (e * i - ff * h) / det, ib = (c * h - b * i) / det, ic = (b * ff - c * e) / det;
++    const float id = (ff * g - d * i) / det, ie = (a * i - c * g) / det, iff = (c * d - a * ff) / det;
++    const float ig = (d * h - e * g) / det, ih = (b * g - a * h) / det, ii = (a * e - b * d) / det;
++    const float uu = rel.x / sz.x, vv = rel.y / sz.y;
++    const float ww = ig * uu + ih * vv + ii;
++    if (ww == 0.0f)
++        return rel;
++    const float su = (ia * uu + ib * vv + ic) / ww;
++    const float sv = (id * uu + ie * vv + iff) / ww;
++    // A hit in the vacated area beside the trapezoid maps outside the surface;
++    // signal a miss (sentinel) so the window is not interacted with where nothing
++    // is drawn -- otherwise it would clamp to the edge and read as a left offset.
++    if (su < -0.001f || su > 1.001f || sv < -0.001f || sv > 1.001f)
++        return Vector2D(-1.0e6f, -1.0e6f);
++    return Vector2D(su * sz.x, sv * sz.y);
++}
++
+ SP<CWLSurfaceResource> CViewHitTester::windowSurfaceAt(const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) const {
+     if (!validMapped(window))
+         return nullptr;
+@@ -269,7 +319,11 @@
+         return PPOPUP->wlSurface()->resource();
+     }
+ 
+-    auto [surf, local] = window->wlSurface()->resource()->at(pos - window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL), true);
++    Vector2D ksRel = pos - window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL);
++    ksRel          = ksHitInverse(window, ksRel);
++    if (ksRel.x < -1.0e5) // keystone: hit landed outside the trapezoid -> a miss
++        return nullptr;
++    auto [surf, local] = window->wlSurface()->resource()->at(ksRel, true);
+     if (surf) {
+         surfaceLocal = local;
+         return surf;
+diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+--- a/src/render/OpenGL.cpp	2026-09-29 10:06:01.805989684 +0900
++++ b/src/render/OpenGL.cpp	2026-09-29 11:23:41.030613740 +0900
+@@ -1498,6 +1498,65 @@
+     }
+ }
+ 
++static inline void ksMul3(const float* A, const float* B, float* R) {
++    for (int i = 0; i < 3; ++i)
++        for (int j = 0; j < 3; ++j) {
++            float s = 0.0f;
++            for (int k = 0; k < 3; ++k)
++                s += A[i * 3 + k] * B[k * 3 + j];
++            R[i * 3 + j] = s;
++        }
++}
++
++// Dock keystone: windows tagged "dock" (my.sidedock) render as a perspective
++// trapezoid. H (Heckbert square-to-quad) warps the WINDOW's unit square; each
++// surface (main OR sub-surface) is a sub-rect of the window, so conjugate H by
++// that sub-rect's window-relative transform T (Tinv*H*T) before folding it into
++// the surface's own projection -- this keeps multi-surface apps (Qt/KDE, e.g.
++// dolphin) composing into ONE trapezoid instead of warping each piece alone. For
++// the main surface T == identity, reducing to base*H. Input mirror: ViewHitTester.
++static std::array<GLfloat, 9> ksDockKeystone(const std::array<GLfloat, 9>& base, const CBox& surfBox) {
++    const auto w = g_pHyprRenderer->m_renderData.currentWindow;
++    if (!w || !w->m_ruleApplicator || !w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++        return base;
++    static auto PINSET  = CConfigValue<Config::FLOAT>("decoration:keystone_inset");
++    static auto PSHRINK = CConfigValue<Config::FLOAT>("decoration:keystone_shrink");
++    const float inset = *PINSET, shrink = *PSHRINK;
++    if (inset <= 0.0001f && shrink <= 0.0001f)
++        return base;
++    const auto     MON    = g_pHyprRenderer->m_renderData.pMonitor;
++    const Vector2D winPos = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - (MON ? MON->m_position : Vector2D{0, 0});
++    const Vector2D winSz  = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++    if (winSz.x <= 0 || winSz.y <= 0 || surfBox.width <= 0 || surfBox.height <= 0)
++        return base;
++    // H: window unit square -> trapezoid (Heckbert square-to-quad)
++    const float x0 = inset, y0 = shrink, x1 = 1.0f, y1 = 0.0f, x2 = 1.0f, y2 = 1.0f, x3 = inset, y3 = 1.0f - shrink;
++    const float sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
++    const float dx1 = x1 - x2, dx2 = x3 - x2, dy1 = y1 - y2, dy2 = y3 - y2;
++    const float den = dx1 * dy2 - dx2 * dy1;
++    if (den == 0.0f)
++        return base;
++    const float g = (sx * dy2 - sy * dx2) / den, h = (dx1 * sy - dy1 * sx) / den;
++    const float H[9] = { x1 - x0 + g * x1, x3 - x0 + h * x3, x0,
++                         y1 - y0 + g * y1, y3 - y0 + h * y3, y0,
++                         g,                h,                1.0f };
++    // T: this surface's unit square -> window unit square (same output-local space)
++    const float tsx = sc<float>(surfBox.width) / sc<float>(winSz.x);
++    const float tsy = sc<float>(surfBox.height) / sc<float>(winSz.y);
++    const float tox = (sc<float>(surfBox.x) - sc<float>(winPos.x)) / sc<float>(winSz.x);
++    const float toy = (sc<float>(surfBox.y) - sc<float>(winPos.y)) / sc<float>(winSz.y);
++    if (tsx == 0.0f || tsy == 0.0f)
++        return base;
++    const float T[9]    = { tsx, 0.0f, tox, 0.0f, tsy, toy, 0.0f, 0.0f, 1.0f };
++    const float Tinv[9] = { 1.0f / tsx, 0.0f, -tox / tsx, 0.0f, 1.0f / tsy, -toy / tsy, 0.0f, 0.0f, 1.0f };
++    float HT[9], conj[9];
++    ksMul3(H, T, HT);
++    ksMul3(Tinv, HT, conj);
++    std::array<GLfloat, 9> M{};
++    ksMul3(base.data(), conj, M.data());
++    return M;
++}
++
+ void CHyprOpenGLImpl::renderTextureInternal(SP<ITexture> tex, const CBox& box, const STextureRenderData& data) {
+     RASSERT(g_pHyprRenderer->m_renderData.pMonitor, "Tried to render texture without begin()!");
+     RASSERT(tex, "Attempted to draw nullptr texture!");
+@@ -1538,7 +1597,7 @@
+ 
+     auto shader = renderToOutput ? renderToOutputInternal() : renderToFBInternal(tex, data, tex->m_type, newBox);
+ 
+-    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
++    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, ksDockKeystone(glMatrix.getMatrix(), newBox));
+     shader->setUniformInt(SHADER_TEX, 0);
+     GLCALL(glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO)));
+ 
+diff -ruN a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePassElement.cpp
+--- a/src/render/pass/SurfacePassElement.cpp	2026-09-29 11:35:10.884122806 +0900
++++ b/src/render/pass/SurfacePassElement.cpp	2026-09-29 11:35:26.245559083 +0900
+@@ -7,6 +7,7 @@
+ #include "../../managers/input/InputManager.hpp"
+ #include "../../layout/LayoutManager.hpp"
+ #include "../Renderer.hpp"
++#include "../../config/ConfigValue.hpp"
+ 
+ #include <hyprutils/math/Box.hpp>
+ #include <hyprutils/math/Vector2D.hpp>
+@@ -119,6 +120,17 @@
+ }
+ 
+ CRegion CSurfacePassElement::opaqueRegion() {
++    // Keystoned dock windows (my.sidedock) only visually cover the trapezoid, not
++    // their full rectangular box. Reporting the box as opaque makes the compositor
++    // skip redrawing behind the vacated corners, leaving a frozen chunk of the old
++    // background there. Report NO opaque region so that area is always redrawn.
++    if (m_data.pWindow && m_data.pWindow->m_ruleApplicator && m_data.pWindow->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++        static auto PKSINSET  = CConfigValue<Config::FLOAT>("decoration:keystone_inset");
++        static auto PKSSHRINK = CConfigValue<Config::FLOAT>("decoration:keystone_shrink");
++        if (*PKSINSET > 0.0001f || *PKSSHRINK > 0.0001f)
++            return {};
++    }
++
+     auto        PSURFACE = Desktop::View::CWLSurface::fromResource(m_data.surface);
+ 
+     const float ALPHA = m_data.alpha * m_data.fadeAlpha * (PSURFACE ? PSURFACE->m_alphaModifier * PSURFACE->m_overallOpacity : 1.F);
+diff -ruN a/src/render/shaders/glsl/tex300.vert b/src/render/shaders/glsl/tex300.vert
+--- a/src/render/shaders/glsl/tex300.vert	2026-09-29 10:06:01.801515176 +0900
++++ b/src/render/shaders/glsl/tex300.vert	2026-09-29 10:06:25.223010737 +0900
+@@ -12,7 +12,8 @@
+ out vec2 v_texcoordMatte;
+ 
+ void main() {
+-    gl_Position = vec4(proj * vec3(pos, 1.0), 1.0);
++    vec3 p_ks = proj * vec3(pos, 1.0);
++    gl_Position = vec4(p_ks.xy, 0.0, p_ks.z);
+     v_color = color;
+     v_texcoord = texcoord;
+     v_texcoordMatte = texcoordMatte;
+diff -ruN a/src/render/shaders/glsl/tex320.vert b/src/render/shaders/glsl/tex320.vert
+--- a/src/render/shaders/glsl/tex320.vert	2026-09-29 10:06:01.803721021 +0900
++++ b/src/render/shaders/glsl/tex320.vert	2026-09-29 10:06:25.237313241 +0900
+@@ -12,7 +12,8 @@
+ out vec2 v_texcoordMatte;
+ 
+ void main() {
+-    gl_Position = vec4(proj * vec3(pos, 1.0), 1.0);
++    vec3 p_ks = proj * vec3(pos, 1.0);
++    gl_Position = vec4(p_ks.xy, 0.0, p_ks.z);
+     v_color = color;
+     v_texcoord = texcoord;
+     v_texcoordMatte = texcoordMatte;

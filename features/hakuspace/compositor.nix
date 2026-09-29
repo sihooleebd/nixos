@@ -135,11 +135,13 @@ in
       -- features/hyprland enables compositor-side. A layer surface has to opt
       -- into blur; only windows get it automatically.
       hl.layer_rule({ match = { namespace = "^(waybar)$" }, blur = true, ignore_alpha = 0.05 })
-      -- rofi also gets dim_around: it darkens everything AROUND the launcher
-      -- surface (strength = decoration:dim_around in features/hyprland), so the
-      -- apps behind sink into a blurred, dimmed backdrop instead of staying
-      -- legible next to the selector.
-      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true, ignore_alpha = 0.05, dim_around = true })
+      -- rofi is launched fullscreen + transparent (the haku-fullscreen-blur
+      -- override appended to config.rasi in home.nix), so its layer spans the
+      -- whole screen and this blur frosts the entire desktop behind the menu --
+      -- a real blur, not a dim. NO ignore_alpha here: the backdrop is fully
+      -- transparent, and ignore_alpha would EXCLUDE transparent pixels from the
+      -- blur, leaving the desktop sharp. The centered box (mainbox) stays opaque.
+      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true })
       hl.layer_rule({ match = { namespace = "^(swaync.*)$" }, blur = true, ignore_alpha = 0.05 })
     '';
   };

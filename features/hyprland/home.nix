@@ -380,13 +380,6 @@ in
 
         decoration = {
           rounding = 16;
-          # Strength of the darkening a `dim_around` layer/window rule casts over
-          # the rest of the screen. The shell's rofi layer opts in
-          # (features/hakuspace/compositor.nix) so the launcher + hakumenu hide the
-          # apps behind them; 0.45 leans on the blur to do the hiding and only
-          # tints, rather than blacking out. No effect where no dim_around rule
-          # is active.
-          dim_around = 0.45;
           # Glassmorphism: true backdrop blur behind translucent surfaces.
           # Compositor-side half only. Blur applies to translucent WINDOWS
           # automatically, but a layer surface has to opt in with a
@@ -397,7 +390,14 @@ in
             size = 8;
             passes = 3;
             vibrancy = 0.17;
-            ignore_opacity = true;
+            # false, not true. The rofi launcher is now a fullscreen translucent
+            # layer (features/hakuspace) that fades in/out with the "layers"
+            # animation. ignore_opacity=true kept its blur at FULL strength through
+            # the fade -- so on close the box vanished but the blurred backdrop
+            # lingered a beat before snapping off. false makes the blur track the
+            # layer's opacity, so the backdrop fades out in lockstep with the box.
+            # (Translucent windows still blur; this only affects opacity FADES.)
+            ignore_opacity = false;
             popups = true;
             # Frost texture: over dark/flat backdrops (e.g. the wallpaper
             # strip behind the bar's exclusive zone -- windows never go
@@ -408,6 +408,14 @@ in
             brightness = 1.1;
             contrast = 1.0;
           };
+        } // lib.optionalAttrs osConfig.my.hyprland.keystone.enable {
+          # 3D dock: windows tagged "dock" (my.sidedock) render as a perspective
+          # trapezoid -- the patched compositor (my.hyprland.keystone) reads these
+          # per-window. inset = left-edge horizontal pull-in, shrink = left-edge
+          # vertical shorten (both fractions; 0 = flat). Emitted ONLY when the patch
+          # is present, since the stock compositor rejects these unknown keys.
+          keystone_inset = 0.12;
+          keystone_shrink = 0.08;
         };
 
         /*
@@ -596,6 +604,15 @@ in
       -- a custom ease-out is not available -- "linear" is the no-overshoot one.
       hl.animation({ leaf = "global", enabled = true, speed = 4, bezier = "linear" })
       hl.animation({ leaf = "windows", enabled = true, speed = 3, bezier = "linear" })
+      -- Window MOVES get their own ease-out -- the side-dock slide (my.sidedock) is
+      -- the main thing that moves, and it deserves a curve with some character. The
+      -- hl API's bezier list is only "linear"/"default", but hl.curve REGISTERS a
+      -- named one (the earlier note that hl.bezier is absent missed this): easeOutExpo
+      -- here -- a strong decelerate that still ENDS exactly at 1.0, so it glides in
+      -- without the "default" curve's overshoot/jelly. windowsMove is a child of
+      -- "windows"; overriding it leaves open/close (windowsIn/Out) on linear above.
+      hl.curve("dockslide", { type = "bezier", points = { { 0.16, 1.0 }, { 0.3, 1.0 } } })
+      hl.animation({ leaf = "windowsMove", enabled = true, speed = 5, bezier = "dockslide" })
       hl.animation({ leaf = "border", enabled = true, speed = 3, bezier = "linear" })
       hl.animation({ leaf = "fade", enabled = true, speed = 3, bezier = "linear" })
       -- Layer surfaces explicitly on the no-overshoot curve too: this is where
@@ -746,7 +763,9 @@ in
       -- app_id / XWayland WM_CLASS); if a rule doesn't bite, check the real
       -- class with `hyprctl clients | grep -i <app>`. float + center in one
       -- rule -- both verified accepted by this build's Lua binding.
-      hl.window_rule({ match = { class = "^(org\\.kde\\.dolphin)$" }, float = true, center = true })
+      -- size, or dolphin floats at the fullscreen size it requests (it saves no
+      -- geometry under Wayland). 1200x800 centred = a normal file-manager window.
+      hl.window_rule({ match = { class = "^(org\\.kde\\.dolphin)$" }, float = true, center = true, size = "1200 800" })
       hl.window_rule({ match = { class = "^(.*pavucontrol.*)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(blueman-manager)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(nm-connection-editor)$" }, float = true, center = true })
@@ -819,7 +838,23 @@ in
 
       -- Window management
       hl.bind(mod .. " + Q", hl.dsp.window.close())
-      hl.bind(mod .. " + F", hl.dsp.window.fullscreen({ mode = "fullscreen" }))
+      -- SUPER+F (fullscreen) and SUPER+SHIFT+F (float-toggle, below) must NOT fire
+      -- on side-dock windows (my.sidedock, tagged "dock"): fullscreening or
+      -- unfloating a docked card breaks the cascade. Gate both on the active
+      -- window's tag; defensive pcall falls through to the normal action.
+      local function ksActiveIsDock()
+        local hit = false
+        pcall(function()
+          local aw = hl.get_active_window()
+          if aw and aw.tags then
+            for _, t in ipairs(aw.tags) do if t == "dock" or t == "dock*" then hit = true; break end end
+          end
+        end)
+        return hit
+      end
+      local ksFullscreen = hl.dsp.window.fullscreen({ mode = "fullscreen" })
+      local ksFloat      = hl.dsp.window.float()
+      hl.bind(mod .. " + F", function() if not ksActiveIsDock() then hl.dispatch(ksFullscreen) end end)
       -- niri's maximize-column, now a real TOGGLE on Mod+D (end-4's key for
       -- it; Mod+D is free now that its earlier weirdness is understood --
       -- it was never a DMS collision, just Hyprland's MAXIMIZED state
@@ -839,37 +874,14 @@ in
       --   (bar exclusive zone) -- LuaMonitor.cpp
       -- 0.9 threshold: a full column is usable minus 2*gaps_out (8px);
       -- the next preset down is 0.66, comfortably below.
-      hl.bind(mod .. " + D", function()
-        local w = hl.get_active_window()
-        if not w or w.floating then return end
-        -- A window in fullscreen STATE (w.fullscreen: 0 none, 1 maximized,
-        -- 2 fullscreen -- the FSMODE enum) renders full-screen regardless
-        -- of its column width, so colresize alone visibly does nothing.
-        -- Emacs is the live case: its `maximize on` windowrule opens it in
-        -- state 1, and the first Mod+D "didn't shrink" because it resized
-        -- the column underneath the state. Clear the state instead; the
-        -- column width it returns to is whatever it had.
-        if w.fullscreen ~= 0 then
-          hl.dispatch(hl.dsp.window.fullscreen({
-            mode = (w.fullscreen == 1) and "maximized" or "fullscreen",
-            action = "unset",
-          }))
-          return
-        end
-        local m = w.monitor
-        if not m then return end
-        local pw = (m.transform % 2 == 1) and m.size.height or m.size.width
-        local usable = pw / m.scale - m.reserved.left - m.reserved.right
-        if w.size.x >= usable * 0.9 then
-          -- 0.5 = scrolling.column_width in the config table above; keep in sync.
-          hl.dispatch(hl.dsp.layout("colresize 0.5"))
-        else
-          hl.dispatch(hl.dsp.layout("colresize 1"))
-        end
-      end)
+      -- (mod+D was a column-width cycle via `layoutmsg colresize`, but the active
+      -- layout no longer accepts that message -- it just errored "unknown dwindle
+      -- layoutmsg: colresize". Removed; mod+D now toggles the side dock, see
+      -- features/sidedock.)
       hl.bind(mod .. " + ALT + space", hl.dsp.window.float())
-      -- Same float toggle on Mod+Shift+F (pairs with Mod+F = fullscreen).
-      hl.bind(mod .. " + SHIFT + F", hl.dsp.window.float())
+      -- Same float toggle on Mod+Shift+F (pairs with Mod+F = fullscreen), but
+      -- likewise skipped on dock windows (see ksActiveIsDock above).
+      hl.bind(mod .. " + SHIFT + F", function() if not ksActiveIsDock() then hl.dispatch(ksFloat) end end)
       -- end-4's Mod+P is "pin". Mod+P is left free here for a shell to claim
       -- (DMS binds its notepad there), so pin goes on Mod+Alt+P rather than
       -- taking a key the shell layer is expected to want.
@@ -885,7 +897,40 @@ in
       -- never carried over: Mod + left-drag moves a window anywhere
       -- (floats it out of the tiling if dragged free), Mod + right-drag
       -- resizes. { mouse = true } is what makes a bind track the pointer.
-      hl.bind(mod .. " + mouse:272", hl.dsp.window.drag(), { mouse = true })
+      --
+      -- Side-dock windows (my.sidedock, tagged "dock") are pinned in place:
+      -- dragging one out would defeat the panel, so the left-drag is wrapped
+      -- to skip when the pointer is over ANY dock window (front included).
+      -- Right-drag needs no guard -- those windows are size-locked (min==max),
+      -- so a resize is clamped to a no-op. The check is defensive: any query
+      -- miss falls through to a normal drag, so a hiccup can never disable
+      -- dragging.
+      --
+      -- NB: hl.get_windows({ tag = "dock" }) does NOT match RULE-applied tags
+      -- (they read as "dock*"), so we iterate every window and check w.tags
+      -- ourselves -- w.tags DOES contain "dock*". (The earlier filter form was
+      -- the bug that left the front window draggable.)
+      local startWindowDrag = hl.dsp.window.drag()
+      hl.bind(mod .. " + mouse:272", function()
+        local overDock = false
+        pcall(function()
+          local c = hl.get_cursor_pos()
+          for _, w in ipairs(hl.get_windows()) do
+            local isDock = false
+            if w.tags then
+              for _, t in ipairs(w.tags) do if t == "dock" or t == "dock*" then isDock = true; break end end
+            end
+            if isDock and not w.hidden
+               and c.x >= w.at.x and c.x < w.at.x + w.size.x
+               and c.y >= w.at.y and c.y < w.at.y + w.size.y then
+              overDock = true
+              break
+            end
+          end
+        end)
+        -- a dispatcher object can't be called directly; hl.dispatch runs it
+        if not overDock then hl.dispatch(startWindowDrag) end
+      end, { mouse = true })
       hl.bind(mod .. " + mouse:273", hl.dsp.window.resize(), { mouse = true })
 
       -- Focus movement (h/j/k/l + arrows). hl.dsp.focus is the single

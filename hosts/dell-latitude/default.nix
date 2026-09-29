@@ -478,6 +478,20 @@
     tuigreet.enable = true;
 
     hakuspace.enable = true;
+    # Right-edge cascade dock (SUPER+D shifts the pile, SUPER+SHIFT+D parks it):
+    # sonora + easyeffects auto-route in; SUPER+SHIFT+T opens a docked terminal;
+    # push any other window in with SUPER+ALT+D. See features/sidedock.
+    sidedock = {
+      enable = true;
+      # Bare regex bodies (each wrapped ^(...)$). Dots are left unescaped: a
+      # backslash here would reach the generated Lua as an invalid string escape
+      # (\.), and "." matching any char still matches the literal app-id fine.
+      apps = [ "sonora" "com.github.wwmm.easyeffects" ];
+    };
+    # EXPERIMENTAL: perspective-trapezoid render for dock windows (patches the
+    # compositor). Enabled to BUILD the patched binary for nested testing; do NOT
+    # `nixos-rebuild switch` to it until the nested test looks right.
+    hyprland.keystone.enable = true;
 
     network = {
       enable = true;
@@ -485,22 +499,10 @@
     };
   };
 
-  /*
-    Sonora (music player), host-scoped since it is a dell-latitude-only app.
-    Installed above; here it only floats + centers on the current workspace,
-    exactly like Dolphin and the other utility windows -- no autostart (removed
-    per request; launch it from the dock/menu), no special workspace, no summon
-    keybind. extraConfig is types.lines and features/hyprland's fragments are
-    mkAfter, so this appends cleanly to the generated Lua.
-  */
-  home-manager.users.benjamin = {
-    wayland.windowManager.hyprland.extraConfig = lib.mkAfter ''
-      -- Sonora floats+centers, same as Dolphin. Class from StartupWMClass.
-      hl.window_rule({ match = { class = "^(sonora)$" }, float = true, center = true })
-      -- ...and the same 0.65 glass as the other chrome-heavy apps.
-      hl.window_rule({ match = { class = "^(sonora)$" }, opacity = "0.65 0.65" })
-    '';
-  };
+  # Sonora (music player) is installed above; the side dock (my.sidedock) fully
+  # owns its window behaviour -- float, size-lock, cascade position, opacity and
+  # z-order are all set by features/sidedock's rule + script -- so there is no
+  # host-level window rule for it here.
 
   networking.hostName = "dell-latitude";
 

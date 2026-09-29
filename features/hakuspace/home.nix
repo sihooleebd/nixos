@@ -788,6 +788,23 @@ in
           run mkdir -p "$HOME/.config/rofi"
           run install -m644 ${share}/rofi/config.rasi "$HOME/.config/rofi/config.rasi"
         fi
+        # Fullscreen frosted backdrop for BOTH the launcher and hakumenu (both read
+        # this config.rasi). The shipped layout themes make `window` a small opaque
+        # box, so Hyprland's blur has nothing to show through -- only a dim was ever
+        # visible. Override window to fullscreen + transparent (the visible box moves
+        # to the centered `mainbox`), so the rofi LAYER spans the screen and the
+        # blur rule in compositor.nix frosts the whole desktop behind it. Appended
+        # AFTER the theme's `@theme` line so it wins; marker-guarded so it's written
+        # once and the theme switcher (which only seds the `@theme` line) leaves it
+        # intact. Tune the padding (box size) / border-radius here if needed.
+        if [ -e "$HOME/.config/rofi/config.rasi" ] && ! grep -q 'haku-fullscreen-blur' "$HOME/.config/rofi/config.rasi" 2>/dev/null; then
+          cat >> "$HOME/.config/rofi/config.rasi" <<'ROFIBLUR'
+
+/* haku-fullscreen-blur (nix-managed, see features/hakuspace/home.nix) */
+window { fullscreen: true; background-color: transparent; padding: 25% 32%; border-radius: 0px; }
+mainbox { background-color: @background; border-radius: 4px; padding: 20px; }
+ROFIBLUR
+        fi
       '';
 
     /*
@@ -1131,12 +1148,30 @@ in
         hyprlockNoText =
           name: extra:
           let
-            # Also swap the password-box placeholder: upstream ships the cutesy
-            # "<i> Use Me ;) </i>", which is not it. replaceStrings is a no-op on
-            # a file that lacks the string (e.g. hyprlock_tiny.conf).
+            # Two rewrites of the upstream file (replaceStrings is a no-op on a
+            # file lacking the string, e.g. hyprlock_tiny.conf):
+            #   1. Swap the cutesy password placeholder "<i> Use Me ;) </i>".
+            #   2. Match the lock-screen background blur to the compositor frost
+            #      (features/hyprland decoration.blur): stronger blur (passes 2->3,
+            #      explicit size 8), a noise grain, and -- the point -- UN-DARKEN it
+            #      (brightness 0.5 -> 1.1) so it reads as a real frost, not a dim,
+            #      the same way the rofi backdrop does. If the white widgets wash
+            #      out on a bright wallpaper, `brightness` is the knob.
             base = builtins.replaceStrings
-              [ "<i> Use Me ;) </i>" ]
-              [ "<i>Enter password</i>" ]
+              [
+                "<i> Use Me ;) </i>"
+                "blur_passes = 2"
+                "contrast = 1.2"
+                "brightness = 0.5"
+                "vibrancy_darkness = 0"
+              ]
+              [
+                "<i>Enter password</i>"
+                "blur_passes = 3\n    blur_size = 8"
+                "contrast = 1.0"
+                "brightness = 1.1"
+                "vibrancy_darkness = 0\n    noise = 0.02"
+              ]
               (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}"));
           in
           # writeText, NOT builtins.toFile: `extra` now interpolates script store

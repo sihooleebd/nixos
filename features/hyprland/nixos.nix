@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
 {
   /*
@@ -58,6 +58,14 @@
         another hook having run.
       '';
     };
+
+    keystone.enable = lib.mkEnableOption ''
+      EXPERIMENTAL per-window perspective-trapezoid rendering for dock-tagged
+      windows (my.sidedock). Patches the compositor (features/hyprland/trapezoid.patch):
+      the tex vertex shaders honour a projective w, and renderTextureInternal
+      post-multiplies a yaw homography into the projection for windows tagged
+      "dock". Every other window renders exactly as before. Rebuilds Hyprland from
+      source -- test the built binary NESTED before switching the real session'';
   };
 
   config = lib.mkIf (config.my.desktop.compositor == "hyprland") {
@@ -69,5 +77,11 @@
       # are missing -> "systemctl --user start ... exit status 5" crash loop.
       withUWSM = true;
     };
+
+    # The keystone patch, applied to the exact fork Hyprland this config uses.
+    programs.hyprland.package = lib.mkIf config.my.hyprland.keystone.enable
+      (pkgs.hyprland.overrideAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ ./trapezoid.patch ];
+      }));
   };
 }
