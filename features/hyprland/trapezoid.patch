@@ -1,7 +1,86 @@
+diff -ruN a/src/config/legacy/ConfigManager.cpp b/src/config/legacy/ConfigManager.cpp
+--- a/src/config/legacy/ConfigManager.cpp	2026-10-06 08:39:35.595758944 +0900
++++ b/src/config/legacy/ConfigManager.cpp	2026-10-06 08:39:35.668361315 +0900
+@@ -53,6 +53,7 @@
+ #include "../../managers/input/trackpad/gestures/WorkspaceSwipeGesture.hpp"
+ #include "../../managers/input/trackpad/gestures/ResizeGesture.hpp"
+ #include "../../managers/input/trackpad/gestures/MoveGesture.hpp"
++#include "../../managers/input/trackpad/gestures/OverviewGesture.hpp"
+ #include "../../managers/input/trackpad/gestures/SpecialWorkspaceGesture.hpp"
+ #include "../../managers/input/trackpad/gestures/CloseGesture.hpp"
+ #include "../../managers/input/trackpad/gestures/FloatGesture.hpp"
+@@ -1986,6 +1987,8 @@
+         result = g_pTrackpadGestures->addGesture(makeUnique<CResizeTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
+     else if (data[startDataIdx] == "move")
+         result = g_pTrackpadGestures->addGesture(makeUnique<CMoveTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
++    else if (data[startDataIdx] == "overview") // dock keystone mission-control toggle (my.sidedock)
++        result = g_pTrackpadGestures->addGesture(makeUnique<COverviewTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
+     else if (data[startDataIdx] == "special")
+         result =
+             g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale, disableInhibit);
+diff -ruN a/src/config/lua/bindings/LuaBindingsConfigRules.cpp b/src/config/lua/bindings/LuaBindingsConfigRules.cpp
+--- a/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 08:39:35.596160843 +0900
++++ b/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 08:39:35.668696500 +0900
+@@ -37,6 +37,7 @@
+ #include "../../../managers/input/trackpad/gestures/FullscreenGesture.hpp"
+ #include "../../../managers/input/trackpad/gestures/LuaFunctionGesture.hpp"
+ #include "../../../managers/input/trackpad/gestures/MoveGesture.hpp"
++#include "../../../managers/input/trackpad/gestures/OverviewGesture.hpp"
+ #include "../../../managers/input/trackpad/gestures/ResizeGesture.hpp"
+ #include "../../../managers/input/trackpad/gestures/SpecialWorkspaceGesture.hpp"
+ #include "../../../managers/input/trackpad/gestures/WorkspaceSwipeGesture.hpp"
+@@ -940,6 +941,8 @@
+             result = g_pTrackpadGestures->addGesture(makeUnique<CResizeTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
+         else if (action == "move")
+             result = g_pTrackpadGestures->addGesture(makeUnique<CMoveTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
++        else if (action == "overview") // dock keystone mission-control toggle (my.sidedock)
++            result = g_pTrackpadGestures->addGesture(makeUnique<COverviewTrackpadGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
+         else if (action == "special")
+             result = g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(workspaceName), fingerCount, direction, modMask, deltaScale, disableInhibit);
+         else if (action == "close")
+diff -ruN a/src/config/lua/bindings/LuaBindingsDispatchers.cpp b/src/config/lua/bindings/LuaBindingsDispatchers.cpp
+--- a/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 08:39:35.596223289 +0900
++++ b/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 08:39:35.668895181 +0900
+@@ -14,6 +14,7 @@
+ #include "../../../devices/IKeyboard.hpp"
+ #include "../../../desktop/rule/windowRule/WindowRule.hpp"
+ #include "config/shared/actions/ConfigActions.hpp"
++#include "../../../render/Renderer.hpp" // dock keystone overview: g_pHyprRenderer->ksOverviewToggle()
+ 
+ using namespace Config;
+ using namespace Config::Lua;
+@@ -335,6 +336,19 @@
+     return 1;
+ }
+ 
++// Dock keystone (my.sidedock): toggle the mission-control overview from a keybind, since
++// 5-finger trackpad gestures don't fire on many touchpads. Bound via hl.dsp.overview().
++static int dsp_overview(lua_State* L) {
++    if (g_pHyprRenderer)
++        g_pHyprRenderer->ksOverviewToggle();
++    return Internal::checkResult(L, CA::SActionResult{});
++}
++
++static int hlOverview(lua_State* L) {
++    lua_pushcclosure(L, dsp_overview, 0);
++    return 1;
++}
++
+ static int hlForceIdle(lua_State* L) {
+     auto timeout = Check::number(L, 1);
+     if (!timeout)
+@@ -1408,6 +1422,7 @@
+         Internal::setFn(L, "event", hlEvent);
+         Internal::setFn(L, "global", hlGlobal);
+         Internal::setFn(L, "force_renderer_reload", hlForceRendererReload);
++        Internal::setFn(L, "overview", hlOverview); // dock keystone mission-control toggle (my.sidedock)
+         Internal::setFn(L, "force_idle", hlForceIdle);
+         Internal::setFn(L, "release_input_capture", hlReleaseInputCapture);
+         Internal::setFn(L, "focus", hlFocus);
 diff -ruN a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
---- a/src/config/values/ConfigValues.cpp	2026-09-29 10:06:01.808557155 +0900
-+++ b/src/config/values/ConfigValues.cpp	2026-09-29 10:06:25.252128247 +0900
-@@ -201,6 +201,10 @@
+--- a/src/config/values/ConfigValues.cpp	2026-10-06 08:39:35.598792291 +0900
++++ b/src/config/values/ConfigValues.cpp	2026-10-06 08:39:35.669087178 +0900
+@@ -201,6 +201,18 @@
                  {.min = 0, .max = 20, .refresh = Supplementary::REFRESH_WINDOW_STATES | Supplementary::REFRESH_BLUR_FB}),
          MS<Float>("decoration:rounding_power", "rounding power of corners (2 is a circle)", 2,
                    {.min = 2, .max = 10, .refresh = Supplementary::REFRESH_WINDOW_STATES | Supplementary::REFRESH_BLUR_FB}),
@@ -9,13 +88,21 @@ diff -ruN a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.
 +                  {.min = 0.f, .max = 0.5f}),
 +        MS<Float>("decoration:keystone_shrink", "dock keystone: left-edge vertical shrink fraction (0 = off)", 0.f,
 +                  {.min = 0.f, .max = 0.5f}),
++        MS<Float>("decoration:keystone_rounding", "dock keystone: corner radius (px) + edge anti-aliasing (0 = off)", 0.f,
++                  {.min = 0.f, .max = 200.f}),
++        MS<Int>("decoration:keystone_shadow_range", "dock keystone: drop-shadow spread in px for dock windows (0 = use the global shadow range)", 0,
++                {.min = 0, .max = 400}),
++        MS<Float>("decoration:keystone_shadow_dx", "dock keystone: drop-shadow horizontal offset (px, + = right) for dock windows", 0.f, {.min = -400.f, .max = 400.f}),
++        MS<Float>("decoration:keystone_shadow_dy", "dock keystone: drop-shadow vertical offset (px, + = down) for dock windows", 0.f, {.min = -400.f, .max = 400.f}),
++        MS<Float>("decoration:keystone_shadow_alpha", "dock keystone: drop-shadow strength multiplier for dock windows", 1.f, {.min = 0.f, .max = 1.f}),
++        MS<Float>("decoration:keystone_parallax", "dock keystone: cursor-parallax lean strength (0 = off)", 0.f, {.min = 0.f, .max = 1.f}),
          MS<Float>("decoration:active_opacity", "opacity of active windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
          MS<Float>("decoration:inactive_opacity", "opacity of inactive windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
          MS<Float>("decoration:fullscreen_opacity", "opacity of fullscreen windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
 diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTester.cpp
---- a/src/desktop/state/ViewHitTester.cpp	2026-09-29 10:06:01.810869540 +0900
-+++ b/src/desktop/state/ViewHitTester.cpp	2026-09-29 10:41:39.716426927 +0900
-@@ -254,6 +254,56 @@
+--- a/src/desktop/state/ViewHitTester.cpp	2026-10-06 08:39:35.601064426 +0900
++++ b/src/desktop/state/ViewHitTester.cpp	2026-10-06 08:40:51.935260618 +0900
+@@ -254,6 +254,72 @@
      return windowForWorkspace(false);
  }
  
@@ -69,10 +156,26 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
 +    return Vector2D(su * sz.x, sv * sz.y);
 +}
 +
++// Dock keystone (input side, X11): the Wayland pointer path runs through windowSurfaceAt(),
++// which applies ksHitInverse -- but that function asserts !m_isX11, so X11 dock windows
++// (e.g. Wine apps) never got the inverse and their clicks hit the FLAT rectangle: the right
++// edge coincides with the trapezoid, the inset left edge does not, so hits drift left. This
++// gives InputManager the trapezoid-mapped coord for X11 dock windows; a hit in the vacated
++// strip (or any non-dock window) falls back to the original flat coord, so nothing else moves.
++Vector2D CViewHitTester::keystoneSurfaceLocal(const Vector2D& pos, PHLWINDOW window) const {
++    if (window->m_ruleApplicator && window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++        // Either a real hit inside the trapezoid, OR the sentinel (x < -1e5) for a hit in the
++        // vacated strip beside it. Return the sentinel too (don't fall back to the flat coord):
++        // the caller leaves foundSurface null on a sentinel so the empty margin is a clean MISS
++        // instead of registering offset. Non-dock windows get the plain flat coord below.
++        return ksHitInverse(window, pos - window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL));
++    return pos - window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++}
++
  SP<CWLSurfaceResource> CViewHitTester::windowSurfaceAt(const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) const {
      if (!validMapped(window))
          return nullptr;
-@@ -269,7 +319,11 @@
+@@ -269,7 +335,11 @@
          return PPOPUP->wlSurface()->resource();
      }
  
@@ -85,10 +188,244 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
      if (surf) {
          surfaceLocal = local;
          return surf;
+diff -ruN a/src/desktop/state/ViewHitTester.hpp b/src/desktop/state/ViewHitTester.hpp
+--- a/src/desktop/state/ViewHitTester.hpp	2026-10-06 08:39:35.601088374 +0900
++++ b/src/desktop/state/ViewHitTester.hpp	2026-10-06 08:39:35.669411247 +0900
+@@ -22,6 +22,10 @@
+         PHLWINDOW              windowAt(const Vector2D& pos, uint16_t properties, PHLWINDOW ignoreWindow = nullptr) const;
+         SP<CWLSurfaceResource> windowSurfaceAt(const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) const;
+         Vector2D               surfaceLocalAt(const Vector2D& pos, PHLWINDOW window, SP<CWLSurfaceResource> surface) const;
++        // Dock keystone (input side): surface-local coord for an X11 dock window, mapped through
++        // the SAME inverse homography the Wayland path uses (windowSurfaceAt) so clicks follow
++        // the trapezoid. Non-dock windows get the plain flat coord (no behaviour change).
++        Vector2D               keystoneSurfaceLocal(const Vector2D& pos, PHLWINDOW window) const;
+         SP<CWLSurfaceResource> layerPopupSurfaceAt(const Vector2D& pos, PHLMONITOR monitor, Vector2D* surfaceCoords, PHLLS* layerFound) const;
+         SP<CWLSurfaceResource> layerPopupSurfaceAt(const Vector2D& pos, const std::vector<PHLLSREF>* layerSurfaces, Vector2D* surfaceCoords, PHLLS* layerFound) const;
+         SP<CWLSurfaceResource> layerSurfaceAt(const Vector2D& pos, std::vector<PHLLSREF>* layerSurfaces, Vector2D* surfaceCoords, PHLLS* layerFound,
+diff -ruN a/src/managers/input/InputManager.cpp b/src/managers/input/InputManager.cpp
+--- a/src/managers/input/InputManager.cpp	2026-10-06 08:39:35.606405069 +0900
++++ b/src/managers/input/InputManager.cpp	2026-10-06 08:40:35.448237067 +0900
+@@ -239,6 +239,19 @@
+     if (MOUSECOORDSFLOORED == m_lastCursorPosFloored && !refocus)
+         return;
+ 
++    // Dock keystone cursor-parallax: cards lean toward the pointer (OpenGL.cpp
++    // ksDockKeystone reads the live cursor), so a real pointer move must re-warp them --
++    // cursor motion doesn't damage window content on its own. Damage every mapped dock
++    // window, only when parallax is enabled (a handful of small windows -> cheap). This
++    // runs past the "didn't actually move" early-return above, so only on genuine motion.
++    {
++        static auto PKSPARALLAX = CConfigValue<Config::FLOAT>("decoration:keystone_parallax");
++        if (*PKSPARALLAX > 0.0001f)
++            for (auto const& w : Desktop::windowState()->windows())
++                if (w && w->m_isMapped && w->m_ruleApplicator && w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++                    g_pHyprRenderer->damageWindow(w);
++    }
++
+     static auto PFOLLOWMOUSE          = CConfigValue<Config::INTEGER>("input:follow_mouse");
+     static auto PFOLLOWMOUSETHRESHOLD = CConfigValue<Config::FLOAT>("input:follow_mouse_threshold");
+     static auto PMOUSEREFOCUS         = CConfigValue<Config::INTEGER>("input:mouse_refocus");
+@@ -521,8 +534,14 @@
+                 foundSurface = Desktop::viewState()->hitTest().windowSurfaceAt(mouseCoords, pFoundWindow, surfaceCoords);
+                 surfacePos   = Vector2D(-1337, -1337);
+             } else {
+-                foundSurface = pFoundWindow->wlSurface()->resource();
+-                surfacePos   = pFoundWindow->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++                // Dock keystone: X11 dock windows render as a trapezoid too, so map the hit through
++                // the SAME inverse homography the Wayland path applies (windowSurfaceAt). A sentinel
++                // (x < -1e5) means the hit landed in the vacated strip beside the trapezoid -- a real
++                // MISS: leave foundSurface null so it falls through, instead of registering the flat
++                // coord. Non-dock X11 windows get the unchanged flat coord (never a sentinel).
++                surfaceCoords = Desktop::viewState()->hitTest().keystoneSurfaceLocal(mouseCoords, pFoundWindow);
++                foundSurface  = surfaceCoords.x < -1.0e5 ? nullptr : pFoundWindow->wlSurface()->resource();
++                surfacePos    = Vector2D(-1337, -1337);
+             }
+         }
+     }
+@@ -566,13 +585,24 @@
+         if (pFoundWindow) {
+             if (!pFoundWindow->m_isX11) {
+                 foundSurface = Desktop::viewState()->hitTest().windowSurfaceAt(mouseCoords, pFoundWindow, surfaceCoords);
+-                if (!foundSurface) {
++                // Dock keystone: a null here is the vacated-strip sentinel -- the hit landed beside the
++                // trapezoid, a REAL miss. Skip the upstream main-surface fallback for dock windows (it
++                // re-grabbed the surface at the flat GEOMETRIC_CURRENT coord, so the card's empty left
++                // margin registered offset right+down); non-dock windows keep the fallback.
++                if (!foundSurface &&
++                    !(pFoundWindow->m_ruleApplicator && pFoundWindow->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))) {
+                     foundSurface = pFoundWindow->wlSurface()->resource();
+                     surfacePos   = pFoundWindow->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+                 }
+             } else {
+-                foundSurface = pFoundWindow->wlSurface()->resource();
+-                surfacePos   = pFoundWindow->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++                // Dock keystone: X11 dock windows render as a trapezoid too, so map the hit through
++                // the SAME inverse homography the Wayland path applies (windowSurfaceAt). A sentinel
++                // (x < -1e5) means the hit landed in the vacated strip beside the trapezoid -- a real
++                // MISS: leave foundSurface null so it falls through, instead of registering the flat
++                // coord. Non-dock X11 windows get the unchanged flat coord (never a sentinel).
++                surfaceCoords = Desktop::viewState()->hitTest().keystoneSurfaceLocal(mouseCoords, pFoundWindow);
++                foundSurface  = surfaceCoords.x < -1.0e5 ? nullptr : pFoundWindow->wlSurface()->resource();
++                surfacePos    = Vector2D(-1337, -1337);
+             }
+         }
+     }
+@@ -761,6 +791,15 @@
+ 
+     m_lastCursorMovement.reset();
+ 
++    // Dock keystone overview (mission control): while the overlay is up, a press selects the
++    // thumbnail under the cursor (focuses that window) and closes -- it must not fall through to
++    // normal window/button handling. (Release after the close processes normally; harmless.)
++    if (g_pHyprRenderer && g_pHyprRenderer->m_ksOverviewActive) {
++        if (e.state == WL_POINTER_BUTTON_STATE_PRESSED)
++            g_pHyprRenderer->ksOverviewSelectAt(getMouseCoordsInternal());
++        return;
++    }
++
+     if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
+         m_currentlyHeldButtons.push_back(e.button);
+     } else {
+diff -ruN a/src/managers/input/trackpad/gestures/FloatGesture.cpp b/src/managers/input/trackpad/gestures/FloatGesture.cpp
+--- a/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 08:39:35.606891287 +0900
++++ b/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 08:39:35.669807555 +0900
+@@ -36,6 +36,14 @@
+     if (!m_window)
+         return;
+ 
++    // Side-dock windows (my.sidedock) must NOT be moved by the touchpad gesture:
++    // dragging a keystoned card out of the cascade breaks it (mirrors the
++    // SUPER+drag gate in features/hyprland). Bail before any move begins.
++    if (m_window->m_ruleApplicator && m_window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++        m_window.reset();
++        return;
++    }
++
+     if ((m_window->m_isFloating && m_mode == FLOAT_MODE_FLOAT) || (!m_window->m_isFloating && m_mode == FLOAT_MODE_TILE)) {
+         m_window.reset();
+         return;
+diff -ruN a/src/managers/input/trackpad/gestures/MoveGesture.cpp b/src/managers/input/trackpad/gestures/MoveGesture.cpp
+--- a/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 08:39:35.607016618 +0900
++++ b/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 08:39:35.669908193 +0900
+@@ -10,6 +10,12 @@
+ 
+     m_window    = Desktop::focusState()->window();
+     m_lastDelta = {};
++
++    // Side-dock windows (my.sidedock) must NOT be moved by the touchpad gesture:
++    // dragging a keystoned card out of the cascade breaks it (mirrors SUPER+drag
++    // and the 4-finger gate). Drop the window so update()/end() are no-ops.
++    if (m_window && m_window->m_ruleApplicator && m_window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++        m_window.reset();
+ }
+ 
+ void CMoveTrackpadGesture::update(const ITrackpadGesture::STrackpadGestureUpdate& e) {
+diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.cpp b/src/managers/input/trackpad/gestures/OverviewGesture.cpp
+--- a/src/managers/input/trackpad/gestures/OverviewGesture.cpp	1970-01-01 09:00:00.000000000 +0900
++++ b/src/managers/input/trackpad/gestures/OverviewGesture.cpp	2026-10-06 08:39:35.669980124 +0900
+@@ -0,0 +1,20 @@
++#include "OverviewGesture.hpp"
++
++#include "../../../../render/Renderer.hpp"
++
++// Toggle on gesture begin, so a single 5-finger swipe (either direction) opens or closes the
++// overview immediately -- the "5-finger transitions" feel. update/end are intentionally no-ops
++// (v1 has no live-drag reveal). The snapshot + render + close all live in the renderer.
++void COverviewTrackpadGesture::begin(const ITrackpadGesture::STrackpadGestureBegin& e) {
++    ITrackpadGesture::begin(e);
++    if (g_pHyprRenderer)
++        g_pHyprRenderer->ksOverviewToggle();
++}
++
++void COverviewTrackpadGesture::update(const ITrackpadGesture::STrackpadGestureUpdate&) {
++    ;
++}
++
++void COverviewTrackpadGesture::end(const ITrackpadGesture::STrackpadGestureEnd&) {
++    ;
++}
+diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.hpp b/src/managers/input/trackpad/gestures/OverviewGesture.hpp
+--- a/src/managers/input/trackpad/gestures/OverviewGesture.hpp	1970-01-01 09:00:00.000000000 +0900
++++ b/src/managers/input/trackpad/gestures/OverviewGesture.hpp	2026-10-06 08:39:35.670052989 +0900
+@@ -0,0 +1,19 @@
++#pragma once
++
++#include "ITrackpadGesture.hpp"
++
++#include "../../../../desktop/DesktopTypes.hpp"
++
++// Dock keystone (my.sidedock, trapezoid.patch): a 5-finger gesture that toggles the mission-
++// control overview (expo). Registered as the "overview" gesture action in both config
++// front-ends (legacy ConfigManager + Lua LuaBindingsConfigRules). Mirrors the local
++// Move/Float gesture patch; the actual work lives in CHyprRenderer::ksOverviewToggle().
++class COverviewTrackpadGesture : public ITrackpadGesture {
++  public:
++    COverviewTrackpadGesture()          = default;
++    virtual ~COverviewTrackpadGesture() = default;
++
++    virtual void begin(const ITrackpadGesture::STrackpadGestureBegin& e);
++    virtual void update(const ITrackpadGesture::STrackpadGestureUpdate& e);
++    virtual void end(const ITrackpadGesture::STrackpadGestureEnd& e);
++};
+diff -ruN a/src/render/decorations/CHyprDropShadowDecoration.cpp b/src/render/decorations/CHyprDropShadowDecoration.cpp
+--- a/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 08:39:35.612849399 +0900
++++ b/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 08:39:35.670128208 +0900
+@@ -128,6 +128,21 @@
+     static auto PSHADOWSCALE  = CConfigValue<Config::FLOAT>("decoration:shadow:scale");
+     static auto PSHADOWOFFSET = CConfigValue<Config::VEC2>("decoration:shadow:offset");
+ 
++    // Dock keystone (my.sidedock): dock-tagged windows get their OWN, larger + offset drop
++    // shadow so the trapezoid reads as "floating", WITHOUT inflating every window's shadow.
++    // This only sizes/positions the shadow BOX; renderRoundedShadow() then warps that box to
++    // the trapezoid (ksDockKeystone). Falls back to the global shadow when the dock range is
++    // 0, and is live-tunable (decoration:keystone_shadow_*) exactly like keystone_inset.
++    static auto PKSSHADOWRANGE = CConfigValue<Config::INTEGER>("decoration:keystone_shadow_range");
++    static auto PKSSHADOWDX    = CConfigValue<Config::FLOAT>("decoration:keystone_shadow_dx");
++    static auto PKSSHADOWDY    = CConfigValue<Config::FLOAT>("decoration:keystone_shadow_dy");
++    auto        ksShadowSize   = *PSHADOWSIZE; // Config::INTEGER (int64), same type as the fallback
++    Vector2D    ksShadowOffset = {(*PSHADOWOFFSET).x, (*PSHADOWOFFSET).y};
++    if (*PKSSHADOWRANGE > 0 && PWINDOW->m_ruleApplicator && PWINDOW->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++        ksShadowSize   = *PKSSHADOWRANGE;
++        ksShadowOffset = {*PKSSHADOWDX, *PKSSHADOWDY};
++    }
++
+     const auto  BORDERSIZE       = PWINDOW->getRealBorderSize();
+     const auto  ROUNDINGBASE     = PWINDOW->rounding();
+     const auto  ROUNDINGPOWER    = PWINDOW->roundingPower();
+@@ -139,15 +154,15 @@
+     // draw the shadow
+     CBox fullBox = m_lastWindowBoxWithDecos;
+     fullBox.translate(-pMonitor->m_position + WORKSPACEOFFSET);
+-    fullBox.x -= *PSHADOWSIZE;
+-    fullBox.y -= *PSHADOWSIZE;
+-    fullBox.w += 2 * *PSHADOWSIZE;
+-    fullBox.h += 2 * *PSHADOWSIZE;
++    fullBox.x -= ksShadowSize;
++    fullBox.y -= ksShadowSize;
++    fullBox.w += 2 * ksShadowSize;
++    fullBox.h += 2 * ksShadowSize;
+ 
+     const float SHADOWSCALE = std::clamp(*PSHADOWSCALE, 0.f, 1.f);
+ 
+     // scale the box in relation to the center of the box
+-    fullBox.scaleFromCenter(SHADOWSCALE).translate({(*PSHADOWOFFSET).x, (*PSHADOWOFFSET).y});
++    fullBox.scaleFromCenter(SHADOWSCALE).translate({ksShadowOffset.x, ksShadowOffset.y});
+ 
+     updateWindow(PWINDOW);
+     m_lastWindowPos += WORKSPACEOFFSET;
+@@ -178,7 +193,7 @@
+         .fullBox       = fullBox,
+         .rounding      = ROUNDING,
+         .roundingPower = ROUNDINGPOWER,
+-        .size          = *PSHADOWSIZE,
++        .size          = ksShadowSize,
+     };
+ }
+ 
 diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
---- a/src/render/OpenGL.cpp	2026-09-29 10:06:01.805989684 +0900
-+++ b/src/render/OpenGL.cpp	2026-09-29 11:23:41.030613740 +0900
-@@ -1498,6 +1498,65 @@
+--- a/src/render/OpenGL.cpp	2026-10-06 08:39:35.612462792 +0900
++++ b/src/render/OpenGL.cpp	2026-10-06 08:39:35.670321521 +0900
+@@ -1498,6 +1498,109 @@
      }
  }
  
@@ -109,7 +446,7 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +// the surface's own projection -- this keeps multi-surface apps (Qt/KDE, e.g.
 +// dolphin) composing into ONE trapezoid instead of warping each piece alone. For
 +// the main surface T == identity, reducing to base*H. Input mirror: ViewHitTester.
-+static std::array<GLfloat, 9> ksDockKeystone(const std::array<GLfloat, 9>& base, const CBox& surfBox) {
++static std::array<GLfloat, 9> ksDockKeystone(const std::array<GLfloat, 9>& base, const CBox& surfBox, bool allowParallax = true) {
 +    const auto w = g_pHyprRenderer->m_renderData.currentWindow;
 +    if (!w || !w->m_ruleApplicator || !w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
 +        return base;
@@ -119,8 +456,16 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +    if (inset <= 0.0001f && shrink <= 0.0001f)
 +        return base;
 +    const auto     MON    = g_pHyprRenderer->m_renderData.pMonitor;
-+    const Vector2D winPos = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - (MON ? MON->m_position : Vector2D{0, 0});
-+    const Vector2D winSz  = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++    // surfBox arrives in PHYSICAL (monitor-scaled) output-local coords -- every render
++    // path scales the box by m_scale before drawing (see getTexBox + its callers). But
++    // w->position()/size() are LOGICAL. At scale 1.0 they coincide (T=identity); at a
++    // FRACTIONAL scale they diverge, so the surface->window transform T below came out as
++    // a spurious scale+shift and the trapezoid was shrunk/shifted/skewed. Convert the
++    // window box to the SAME physical space (subtract logical monitor origin, then *scale)
++    // so T is identity for the main surface and a correct fraction for sub-surfaces.
++    const float    MSCALE = MON ? sc<float>(MON->m_scale) : 1.0f;
++    const Vector2D winPos = (w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - (MON ? MON->m_position : Vector2D{0, 0})) * MSCALE;
++    const Vector2D winSz  = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT) * MSCALE;
 +    if (winSz.x <= 0 || winSz.y <= 0 || surfBox.width <= 0 || surfBox.height <= 0)
 +        return base;
 +    // H: window unit square -> trapezoid (Heckbert square-to-quad)
@@ -134,6 +479,42 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +    const float H[9] = { x1 - x0 + g * x1, x3 - x0 + h * x3, x0,
 +                         y1 - y0 + g * y1, y3 - y0 + h * y3, y0,
 +                         g,                h,                1.0f };
++    // CURSOR PARALLAX: lean the card toward the pointer. The bottom row of a homography is
++    // pure perspective, so a small centre-pivoted projective tilt (Hp), driven by the
++    // cursor's offset from THIS card's centre, makes each card face the cursor a little --
++    // cards further from it lean more (clamped). Composed BEFORE the keystone (Hc = H*Hp) so
++    // it warps the flat window then the trapezoid maps it. keystone_parallax = strength, 0 = off.
++    float Hc[9];
++    {
++        static auto PPARALLAX = CConfigValue<Config::FLOAT>("decoration:keystone_parallax");
++        const float parallax  = allowParallax ? sc<float>(*PPARALLAX) : 0.0f; // shadow pass passes allowParallax=false
++        if (parallax > 0.0001f) {
++            const Vector2D cur = (g_pInputManager->getMouseCoordsInternal() - (MON ? MON->m_position : Vector2D{0, 0})) * MSCALE;
++            const float    cxp = sc<float>(winPos.x) + sc<float>(winSz.x) * 0.5f;
++            const float    cyp = sc<float>(winPos.y) + sc<float>(winSz.y) * 0.5f;
++            // Clamp the cursor response to <1 card-dimension so a FAR pointer can't max the lean
++            // out (that was the "moves too much" + extreme overflow). Gentle by design.
++            float          px  = std::clamp((sc<float>(cur.x) - cxp) / sc<float>(winSz.x), -0.7f, 0.7f);
++            float          py  = std::clamp((sc<float>(cur.y) - cyp) / sc<float>(winSz.y), -0.7f, 0.7f);
++            const float    gx  = -parallax * px, gy = -parallax * py; // -: near edge toward cursor comes forward
++            // CONTAIN: a perspective lean pushes unit-square corners OUTSIDE [0,1]; the keystone
++            // then maps those past the trapezoid's right edge (the frame) -> they spill out of the
++            // window box and get scissor-clipped into the "7-fragment" mess. So shrink the quad
++            // toward its centre PROPORTIONALLY to the lean (0 at rest, more at the extreme), which
++            // keeps the leaned result inside [0,1]. The scale folds into Pp's top-left (Sf*P). f
++            // floored so a very large strength shrinks rather than inverts.
++            const float    f     = std::clamp(1.0f - (std::abs(gx) + std::abs(gy)), 0.5f, 1.0f);
++            const float    Pp[9] = { f, 0.0f, 0.0f, 0.0f, f, 0.0f, gx, gy, 1.0f };
++            const float    Tc[9] = { 1.0f, 0.0f, 0.5f, 0.0f, 1.0f, 0.5f, 0.0f, 0.0f, 1.0f };
++            const float    Ti[9] = { 1.0f, 0.0f, -0.5f, 0.0f, 1.0f, -0.5f, 0.0f, 0.0f, 1.0f };
++            float          PT[9], Hp[9];
++            ksMul3(Pp, Ti, PT); // Hp = Tc * (Sf*P) * Tc^-1  (shrink+perspective about the unit centre)
++            ksMul3(Tc, PT, Hp);
++            ksMul3(H, Hp, Hc);
++        } else
++            for (int i = 0; i < 9; ++i)
++                Hc[i] = H[i];
++    }
 +    // T: this surface's unit square -> window unit square (same output-local space)
 +    const float tsx = sc<float>(surfBox.width) / sc<float>(winSz.x);
 +    const float tsy = sc<float>(surfBox.height) / sc<float>(winSz.y);
@@ -144,7 +525,7 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +    const float T[9]    = { tsx, 0.0f, tox, 0.0f, tsy, toy, 0.0f, 0.0f, 1.0f };
 +    const float Tinv[9] = { 1.0f / tsx, 0.0f, -tox / tsx, 0.0f, 1.0f / tsy, -toy / tsy, 0.0f, 0.0f, 1.0f };
 +    float HT[9], conj[9];
-+    ksMul3(H, T, HT);
++    ksMul3(Hc, T, HT);
 +    ksMul3(Tinv, HT, conj);
 +    std::array<GLfloat, 9> M{};
 +    ksMul3(base.data(), conj, M.data());
@@ -154,18 +535,116 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
  void CHyprOpenGLImpl::renderTextureInternal(SP<ITexture> tex, const CBox& box, const STextureRenderData& data) {
      RASSERT(g_pHyprRenderer->m_renderData.pMonitor, "Tried to render texture without begin()!");
      RASSERT(tex, "Attempted to draw nullptr texture!");
-@@ -1538,7 +1597,7 @@
+@@ -1538,7 +1641,29 @@
  
      auto shader = renderToOutput ? renderToOutputInternal() : renderToFBInternal(tex, data, tex->m_type, newBox);
  
 -    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
 +    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, ksDockKeystone(glMatrix.getMatrix(), newBox));
++    // dock keystone: hand surface.frag the corner radius (px) + window size so it draws
++    // anti-aliased ROUNDED edges that follow the trapezoid (keystoneCoverage()). Set for
++    // BOTH the window texture and the separate frosted-blur pass (both come through here),
++    // so their edges coincide. 0 for any non-dock window -> the shader no-ops.
++    {
++        const auto ksWin = g_pHyprRenderer->m_renderData.currentWindow;
++        float      ksR = 0.f, ksSX = 0.f, ksSY = 0.f;
++        if (ksWin && ksWin->m_ruleApplicator && ksWin->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++            static auto PKSROUND = CConfigValue<Config::FLOAT>("decoration:keystone_rounding");
++            const auto  KSMON    = g_pHyprRenderer->m_renderData.pMonitor;
++            const float KSSCALE  = KSMON ? sc<float>(KSMON->m_scale) : 1.0f;
++            const auto  KSSZ     = ksWin->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++            ksR  = *PKSROUND;
++            // PHYSICAL size (v_boxUV is 0..1, keystoneSize scales it to px): keeps the SDF
++            // distance in physical px so the fwidth() AA feather stays ~1px and the corner
++            // radius is consistent regardless of monitor scale (matches the T fix above).
++            ksSX = sc<float>(KSSZ.x) * KSSCALE;
++            ksSY = sc<float>(KSSZ.y) * KSSCALE;
++        }
++        shader->setUniformFloat(SHADER_KEYSTONE_ROUND, ksR);
++        shader->setUniformFloat2(SHADER_KEYSTONE_SIZE, ksSX, ksSY);
++    }
      shader->setUniformInt(SHADER_TEX, 0);
      GLCALL(glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO)));
  
+@@ -2362,7 +2487,39 @@
+ 
+     if (needsCM)
+         shader->setUniformInt(SHADER_SOURCE_TF, TF);
+-    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
++    // Dock keystone (my.sidedock): warp the drop shadow to the SAME perspective trapezoid as
++    // the window (ksDockKeystone conjugates the homography for this box; it's a no-op for any
++    // non-dock window, so the projection is unchanged there). The shadow.frag runs on the
++    // patched tex vertex shaders that honour projective w, so the soft rounded-box falloff and
++    // the window cutout -- both computed in box space -- warp to the trapezoid together. The
++    // shadow box was already enlarged/offset per-dock in CHyprDropShadowDecoration.
++    // allowParallax=false: the shadow follows the base trapezoid but NOT the cursor lean -- it's
++    // offset+expanded, so inheriting the parallax made it detach/distort ("shits shadows"). The
++    // card leaning off a still shadow actually reads as a nicer lift.
++    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, ksDockKeystone(glMatrix.getMatrix(), newBox, false));
++    // Dock-window (my.sidedock) shadow tweaks, both gated on the `dock` tag:
++    //   - dim on their own strength knob (keystone_shadow_alpha), leaving other windows' alone;
++    //   - ROUND the shadow to the card's keystone corner radius. The rule gives dock windows
++    //     rounding()=0, so `round` arrives 0 and the shadow drew SHARP corners that poke past the
++    //     card's keystone-rounded corners (decoration:keystone_rounding, drawn by surface.frag's
++    //     coverage SDF -- the keystone pins the RIGHT edge, so at the top-right the trapezoid ==
++    //     the rectangle and the only visible defect is sharp-vs-rounded). keystone_rounding is in
++    //     physical px (the SDF space) and the shadow box is physical too, so it maps straight onto
++    //     the shadow's round + cutout; the keystone proj then warps the rounded box to the
++    //     trapezoid exactly as it does the window texture.
++    static auto PKSROUND      = CConfigValue<Config::FLOAT>("decoration:keystone_rounding");
++    float       ksShadowAlpha = a;
++    int         ksRound       = round;
++    bool        ksDock        = false;
++    {
++        const auto ksW = g_pHyprRenderer->m_renderData.currentWindow;
++        if (ksW && ksW->m_ruleApplicator && ksW->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++            static auto PKSSHADOWALPHA = CConfigValue<Config::FLOAT>("decoration:keystone_shadow_alpha");
++            ksShadowAlpha              = a * sc<float>(*PKSSHADOWALPHA);
++            ksDock                     = true;
++            ksRound                    = sc<int>(std::round(*PKSROUND));
++        }
++    }
+ 
+     CHyprColor color;
+     if (!grad1.m_colors.empty())
+@@ -2379,18 +2536,18 @@
+         shader->setUniform4fv(SHADER_GRADIENT2, grad2.m_colorsOkLabA.size() / 4, grad2.m_colorsOkLabA);
+     shader->setUniformInt(SHADER_GRADIENT2_LENGTH, grad2.m_colorsOkLabA.size() / 4);
+     shader->setUniformFloat(SHADER_ANGLE2, sc<int>(grad2.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
+-    shader->setUniformFloat(SHADER_ALPHA, a);
++    shader->setUniformFloat(SHADER_ALPHA, ksShadowAlpha);
+     shader->setUniformFloat(SHADER_GRADIENT_LERP, lerp);
+ 
+-    const auto TOPLEFT     = Vector2D(range + round, range + round);
+-    const auto BOTTOMRIGHT = Vector2D(newBox.width - (range + round), newBox.height - (range + round));
++    const auto TOPLEFT     = Vector2D(range + ksRound, range + ksRound);
++    const auto BOTTOMRIGHT = Vector2D(newBox.width - (range + ksRound), newBox.height - (range + ksRound));
+     const auto FULLSIZE    = Vector2D(newBox.width, newBox.height);
+ 
+     // Rounded corners
+     shader->setUniformFloat2(SHADER_TOP_LEFT, sc<float>(TOPLEFT.x), sc<float>(TOPLEFT.y));
+     shader->setUniformFloat2(SHADER_BOTTOM_RIGHT, sc<float>(BOTTOMRIGHT.x), sc<float>(BOTTOMRIGHT.y));
+     shader->setUniformFloat2(SHADER_FULL_SIZE, sc<float>(FULLSIZE.x), sc<float>(FULLSIZE.y));
+-    shader->setUniformFloat(SHADER_RADIUS, round);
++    shader->setUniformFloat(SHADER_RADIUS, ksRound);
+     shader->setUniformFloat(SHADER_ROUNDING_POWER, roundingPower);
+     shader->setUniformFloat(SHADER_RANGE, range);
+     shader->setUniformFloat(SHADER_SHADOW_POWER, SHADOWPOWER);
+@@ -2427,7 +2584,10 @@
+                 const auto cutoutTopLeft     = scaledWindowBox.pos() - newBox.pos();
+                 const auto cutoutBottomRight = cutoutTopLeft + scaledWindowBox.size();
+ 
+-                float      cutoutRadius = std::max(0.F, sc<float>(PWINDOW->rounding() * m_renderData.pMonitor->m_scale));
++                // dock: the window cutout (the hole the card sits in) must round to the keystone
++                // radius too, else the shadow fills a sharp rectangle corner behind the card's
++                // rounded one. ksDock/PKSROUND from the dock block above; already physical px.
++                float      cutoutRadius = ksDock ? sc<float>(*PKSROUND) : std::max(0.F, sc<float>(PWINDOW->rounding() * m_renderData.pMonitor->m_scale));
+                 cutoutRadius            = std::round(cutoutRadius * m_renderData.renderModif.combinedScale());
+ 
+                 shader->setUniformFloat2(SHADER_WINDOW_TOP_LEFT, sc<float>(cutoutTopLeft.x), sc<float>(cutoutTopLeft.y));
 diff -ruN a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePassElement.cpp
---- a/src/render/pass/SurfacePassElement.cpp	2026-09-29 11:35:10.884122806 +0900
-+++ b/src/render/pass/SurfacePassElement.cpp	2026-09-29 11:35:26.245559083 +0900
+--- a/src/render/pass/SurfacePassElement.cpp	2026-10-06 08:39:35.613846056 +0900
++++ b/src/render/pass/SurfacePassElement.cpp	2026-10-06 08:39:35.670606920 +0900
 @@ -7,6 +7,7 @@
  #include "../../managers/input/InputManager.hpp"
  #include "../../layout/LayoutManager.hpp"
@@ -192,11 +671,339 @@ diff -ruN a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePass
      auto        PSURFACE = Desktop::View::CWLSurface::fromResource(m_data.surface);
  
      const float ALPHA = m_data.alpha * m_data.fadeAlpha * (PSURFACE ? PSURFACE->m_alphaModifier * PSURFACE->m_overallOpacity : 1.F);
+diff -ruN a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+--- a/src/render/Renderer.cpp	2026-10-06 08:39:35.612593705 +0900
++++ b/src/render/Renderer.cpp	2026-10-06 08:39:35.670867910 +0900
+@@ -2075,7 +2075,9 @@
+ 
+     // tearing and DS first
+     bool       shouldTear              = pMonitor->updateTearing();
+-    const bool canAttemptDirectScanout = pMonitor->canAttemptDirectScanoutFast();
++    // Dock keystone overview (mission control): never direct-scanout a client buffer while
++    // the overview overlay is up, or it would bypass the compositor and hide the thumbnails.
++    const bool canAttemptDirectScanout = !(m_ksOverviewActive || m_ksOverviewProgress > 0.001f) && pMonitor->canAttemptDirectScanoutFast();
+ 
+     if (canAttemptDirectScanout) {
+         if (pMonitor->attemptDirectScanout()) {
+@@ -2161,7 +2163,9 @@
+ 
+     bool renderCursor = true;
+ 
+-    if (pMonitor->m_solitaryClient && (!finalDamage.empty() || *PSOLDAMAGE))
++    // Dock keystone overview: the solitary-client fast path renders only the one fullscreen
++    // window and skips the workspace -- bypass it while the overview overlay is up.
++    if (!(m_ksOverviewActive || m_ksOverviewProgress > 0.001f) && pMonitor->m_solitaryClient && (!finalDamage.empty() || *PSOLDAMAGE))
+         renderWindow(pMonitor->m_solitaryClient.lock(), pMonitor, NOW, false, RENDER_PASS_MAIN /* solitary = no popups */);
+     else if (!finalDamage.empty()) {
+         if (pMonitor->isMirror()) {
+@@ -2173,6 +2177,11 @@
+         } else {
+             CBox renderBox = {0, 0, sc<int>(pMonitor->m_pixelSize.x), sc<int>(pMonitor->m_pixelSize.y)};
+             renderWorkspace(pMonitor, pMonitor->m_activeWorkspace, NOW, renderBox);
++            // Mission-control overview: an OVERLAY on the live workspace -- dim the real wallpaper
++            // and draw every window as a scaled snapshot tile (incl. ones on OTHER workspaces).
++            // Kept rendering through the close fade (progress > 0) so it isn't a hard cut.
++            if ((m_ksOverviewActive || m_ksOverviewProgress > 0.001F) && pMonitor == Desktop::focusState()->monitor())
++                renderOverview(pMonitor);
+             renderLockscreen(pMonitor, NOW, renderBox);
+ 
+             // render IME even above the lockscreen - allow the user to use it to potentially input stuff on it.
+@@ -3225,6 +3234,128 @@
+     return PFRAMEBUFFER;
+ }
+ 
++// ======================= Dock keystone: mission-control overview (expo) =======================
++// trapezoid.patch (my.sidedock). SUPER+E -> ksOverviewToggle() collects EVERY mapped, non-pinned
++// window across ALL workspaces. While active, renderMonitor() draws the live workspace then calls
++// renderOverview() as an OVERLAY: dim the real wallpaper + draw each window's live surface TEXTURE
++// into a grid tile. Texture-direct, NOT a renderWindow snapshot: off-workspace windows render
++// blank through renderWindow (their workspace is slid off-screen AND its alpha is 0), but the last
++// committed buffer texture is retained, so drawing it directly works for any workspace -- and it's
++// live. A click (ksOverviewSelectAt) jumps to the tile's workspace + focuses it, then closes.
++void IHyprRenderer::ksOverviewToggle() {
++    m_ksOverviewActive = !m_ksOverviewActive;
++    if (m_ksOverviewActive) {
++        m_ksOverviewTiles.clear();
++        for (auto const& w : Desktop::windowState()->windows()) {
++            if (!w || !w->m_isMapped || w->isHidden())
++                continue;
++            if (w->m_pinned) // the side-dock & pinned overlays are always on screen -- skip them
++                continue;
++            SKsOverviewTile tile;
++            tile.window = w;
++            m_ksOverviewTiles.emplace_back(std::move(tile));
++        }
++        if (m_ksOverviewTiles.empty())
++            m_ksOverviewActive = false;
++    }
++    // on close, tiles are kept until the fade-out finishes (renderOverview clears them)
++    for (auto const& m : State::monitorState()->monitors())
++        damageMonitor(m);
++}
++
++void IHyprRenderer::renderOverview(PHLMONITOR pMonitor) {
++    // Step the open/close fade (per frame; a frame is requested below while animating). The
++    // live workspace was already drawn by renderMonitor, so this is an OVERLAY: dim it + tiles.
++    const float STEP = 0.08F;
++    if (m_ksOverviewActive)
++        m_ksOverviewProgress = std::min(1.0F, m_ksOverviewProgress + STEP);
++    else
++        m_ksOverviewProgress = std::max(0.0F, m_ksOverviewProgress - STEP);
++    if (!m_ksOverviewActive && m_ksOverviewProgress <= 0.001F) {
++        m_ksOverviewTiles.clear(); // fully closed -> free the snapshots
++        return;
++    }
++    const float    p  = m_ksOverviewProgress;
++    const float    e  = p * p * (3.0F - 2.0F * p); // smoothstep ease
++    const Vector2D MS = pMonitor->m_transformedSize;
++    // Dim the real desktop (which is rendered underneath) -- so the backdrop is the CURRENT
++    // wallpaper, darkened, not a flat black fill.
++    {
++        CRectPassElement::SRectData d;
++        d.box   = {0, 0, MS.x, MS.y};
++        d.color = CHyprColor(0.0F, 0.0F, 0.0F, 0.72F * e);
++        m_renderPass.add(makeUnique<CRectPassElement>(d));
++    }
++    const int N = sc<int>(m_ksOverviewTiles.size());
++    if (N > 0) {
++        const int   cols  = std::max(1, sc<int>(std::ceil(std::sqrt(sc<float>(N)))));
++        const int   rows  = std::max(1, sc<int>(std::ceil(sc<float>(N) / sc<float>(cols))));
++        const float cellW = sc<float>(MS.x) / sc<float>(cols);
++        const float cellH = sc<float>(MS.y) / sc<float>(rows);
++        CRegion     fakeDamage{0, 0, sc<int>(MS.x), sc<int>(MS.y)};
++        for (int i = 0; i < N; ++i) {
++            auto&      tile = m_ksOverviewTiles[i];
++            const auto win  = tile.window.lock();
++            if (!win)
++                continue;
++            const auto wls  = win->wlSurface();
++            const auto surf = wls ? wls->resource() : nullptr;
++            if (!surf || !surf->m_current.texture) // no live buffer -> nothing to show
++                continue;
++            const int      cx   = i % cols;
++            const int      cy   = i / cols;
++            const float    padX = cellW * 0.04F, padY = cellH * 0.04F;
++            const CBox     cell{cx * cellW + padX, cy * cellH + padY, cellW - 2.F * padX, cellH - 2.F * padY};
++            // Aspect-fit the window into its cell using the window's logical dimensions.
++            const Vector2D wd = win->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
++            if (wd.x <= 0 || wd.y <= 0)
++                continue;
++            const float ar = sc<float>(wd.x) / sc<float>(wd.y);
++            float       tw = sc<float>(cell.w), th = tw / ar;
++            if (th > sc<float>(cell.h)) {
++                th = sc<float>(cell.h);
++                tw = th * ar;
++            }
++            const CBox box{cell.x + (sc<double>(cell.w) - tw) / 2.0, cell.y + (sc<double>(cell.h) - th) / 2.0, sc<double>(tw), sc<double>(th)};
++            tile.box = box; // for click hit-test
++            // Draw the window's LIVE surface texture straight into the tile -- works for any
++            // workspace (the last committed buffer is retained even when the window is hidden),
++            // and updates live. Alpha = the open/close fade.
++            CTexPassElement::SRenderData d;
++            d.tex    = surf->m_current.texture;
++            d.box    = box;
++            d.a      = e;
++            d.damage = fakeDamage;
++            m_renderPass.add(makeUnique<CTexPassElement>(std::move(d)));
++        }
++    }
++    // keep requesting frames until the fade settles
++    if ((m_ksOverviewActive && m_ksOverviewProgress < 1.0F) || (!m_ksOverviewActive && m_ksOverviewProgress > 0.0F))
++        damageMonitor(pMonitor);
++}
++
++bool IHyprRenderer::ksOverviewSelectAt(const Vector2D& coords) {
++    if (!m_ksOverviewActive)
++        return false;
++    const auto PMON = Desktop::focusState()->monitor();
++    if (PMON) {
++        const Vector2D p = (coords - PMON->m_position) * PMON->m_scale; // logical global -> physical monitor-local
++        for (auto& tile : m_ksOverviewTiles) {
++            if (!tile.box.containsPoint(p))
++                continue;
++            if (const auto win = tile.window.lock(); win) {
++                // the picked window may be on another workspace -> jump there, then focus it
++                if (const auto WS = win->m_workspace; WS && WS->m_monitor)
++                    WS->m_monitor->changeWorkspace(WS);
++                Desktop::focusState()->fullWindowFocus(win, Desktop::FOCUS_REASON_CLICK);
++            }
++            break;
++        }
++    }
++    ksOverviewToggle(); // begin the close (active -> false; tiles persist for the fade-out)
++    return true;
++}
++
+ void IHyprRenderer::renderFadeouts(PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace) {
+     if (!monitor)
+         return;
+@@ -3315,7 +3446,15 @@
+     if (!*PBLUR)
+         return false;
+ 
+-    const bool DONT_BLUR = w->m_ruleApplicator->noBlur().valueOrDefault() || w->m_ruleApplicator->RGBX().valueOrDefault() || w->opaque();
++    // dock keystone: force a blur pass on dock windows even when they're opaque/RGBX. An
++    // opaque window normally gets NO blur pass and is treated as a full occluder, so nothing
++    // is composited behind it -- and when the keystone rounds its corners there is nothing
++    // there, so they render black (this bit easyeffects, an opaque XRGB GTK4 app; every
++    // other dock app is ARGB and composites cleanly). Forcing blur keeps a frosted backdrop
++    // behind the window, so the rounded-off corners show frost instead of black. An explicit
++    // no_blur rule still wins (it's off for dock windows -- see features/sidedock).
++    const bool ISDOCK    = w->m_ruleApplicator && w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false);
++    const bool DONT_BLUR = w->m_ruleApplicator->noBlur().valueOrDefault() || (!ISDOCK && (w->m_ruleApplicator->RGBX().valueOrDefault() || w->opaque()));
+     if (DONT_BLUR)
+         return false;
+ 
+diff -ruN a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+--- a/src/render/Renderer.hpp	2026-10-06 08:39:35.612638445 +0900
++++ b/src/render/Renderer.hpp	2026-10-06 08:39:35.671126576 +0900
+@@ -101,6 +101,20 @@
+         SP<IFramebuffer>                    makeSnapshotFB(WP<Desktop::View::CPopup>);
+         void                                renderFadeouts(PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace = nullptr);
+         bool                                beginFullFakeRender(PHLMONITOR pMonitor, CRegion& damage, SP<IFramebuffer> fb);
++
++        // Dock keystone: mission-control overview / expo (my.sidedock, trapezoid.patch). A
++        // 5-finger gesture toggles it; renderMonitor() draws renderOverview() in its place; a
++        // click picks a tile. Snapshots captured on open, held here. See Renderer.cpp.
++        struct SKsOverviewTile {
++            PHLWINDOWREF window;
++            CBox         box; // on-screen tile rect (physical, monitor-local); set by renderOverview
++        };
++        bool                                m_ksOverviewActive   = false;
++        float                               m_ksOverviewProgress = 0.f; // open/close fade 0..1 (stepped per frame)
++        std::vector<SKsOverviewTile>        m_ksOverviewTiles;
++        void                                ksOverviewToggle();
++        void                                renderOverview(PHLMONITOR pMonitor);
++        bool                                ksOverviewSelectAt(const Vector2D& coords);
+         bool                                beginRenderToBuffer(PHLMONITOR pMonitor, CRegion& damage, SP<IHLBuffer> buffer, bool simple = false);
+         virtual void                        startRenderPass() {};
+         virtual void                        endRender(const std::function<void()>& renderingDoneCallback = {}) = 0;
+diff -ruN a/src/render/Shader.cpp b/src/render/Shader.cpp
+--- a/src/render/Shader.cpp	2026-10-06 08:39:35.612659188 +0900
++++ b/src/render/Shader.cpp	2026-10-06 08:39:35.671250347 +0900
+@@ -187,6 +187,8 @@
+     m_uniformLocations[SHADER_RADIUS]                    = getUniform("radius");
+     m_uniformLocations[SHADER_RADIUS_OUTER]              = getUniform("radiusOuter");
+     m_uniformLocations[SHADER_ROUNDING_POWER]            = getUniform("roundingPower");
++    m_uniformLocations[SHADER_KEYSTONE_ROUND]            = getUniform("keystoneRound"); // dock keystone AA/rounding
++    m_uniformLocations[SHADER_KEYSTONE_SIZE]             = getUniform("keystoneSize");
+     m_uniformLocations[SHADER_THICK]                     = getUniform("thick");
+     m_uniformLocations[SHADER_HALFPIXEL]                 = getUniform("halfpixel");
+     m_uniformLocations[SHADER_RANGE]                     = getUniform("range");
+diff -ruN a/src/render/Shader.hpp b/src/render/Shader.hpp
+--- a/src/render/Shader.hpp	2026-10-06 08:39:35.612678442 +0900
++++ b/src/render/Shader.hpp	2026-10-06 08:39:35.671363441 +0900
+@@ -91,6 +91,11 @@
+     SHADER_BLUR_ALPHA,
+     SHADER_TONEMAP_MODE,
+ 
++    // dock keystone: rounded-corner radius (px) + window size, for surface.frag's
++    // anti-aliased trapezoid coverage (keystoneCoverage). 0 radius = off.
++    SHADER_KEYSTONE_ROUND,
++    SHADER_KEYSTONE_SIZE,
++
+     SHADER_LAST,
+ };
+ 
+diff -ruN a/src/render/shaders/glsl/surface.frag b/src/render/shaders/glsl/surface.frag
+--- a/src/render/shaders/glsl/surface.frag	2026-10-06 08:39:35.614473168 +0900
++++ b/src/render/shaders/glsl/surface.frag	2026-10-06 08:39:35.671475493 +0900
+@@ -6,6 +6,7 @@
+ 
+ precision         highp float;
+ in vec2           v_texcoord;
++in vec2           v_boxUV; // keystone: unit-quad pos (0..1), warped to the trapezoid
+ uniform sampler2D tex;
+ #if USE_BLUR
+ uniform vec2      uvSize;
+@@ -19,6 +20,40 @@
+ 
+ uniform float alpha;
+ 
++// keystone dock windows: anti-aliased rounded-corner coverage. keystoneRound is the
++// corner radius in the same (logical px) units as keystoneSize; <= 0.5 disables it (all
++// non-dock windows, set to 0 from OpenGL.cpp). See keystoneCoverage() below.
++uniform float keystoneRound;
++uniform vec2  keystoneSize;
++
++// Signed-distance rounded-rect coverage in window-local space. v_boxUV (0..1) is the
++// surface's unit quad, warped to the trapezoid by the vertex shader's proj, so the
++// rounded + feathered edge follows the 3D shape instead of the flat box. fwidth() gives
++// a ~1px screen-space feather (the anti-aliasing) regardless of the warp. Applied to BOTH
++// the window texture and the separate frosted-blur pass, so their edges coincide.
++float keystoneCoverage() {
++    if (keystoneRound <= 0.5)
++        return 1.0;
++    vec2  p = v_boxUV * keystoneSize;
++    vec2  h = keystoneSize * 0.5;
++    vec2  q = abs(p - h) - (h - keystoneRound);
++    float d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - keystoneRound;
++    float aa = max(fwidth(d), 1.0e-4); // ~1px screen feather; guard degenerate frags
++    return 1.0 - smoothstep(-aa, aa, d);
++}
++
++// keystone dock windows: the perspective warp minifies + shears the texture, so a single
++// bilinear tap (no mipmaps) aliases the INNER CONTENT and the warped edges (the diagonal
++// stair-stepping). Average a rotated 2x2 grid across the fragment's texcoord footprint
++// (dFdx/dFdy give the exact footprint) -> a cheap ~4x supersample. Gated at the call site by
++// keystoneSize>0 (dock windows only), so every normal window keeps its single fast sample.
++vec4 ksSampleAA(sampler2D t, vec2 uv) {
++    vec2 dx = dFdx(uv);
++    vec2 dy = dFdy(uv);
++    return 0.25 * (texture(t, uv - 0.375 * dx - 0.125 * dy) + texture(t, uv - 0.125 * dx + 0.375 * dy) +
++                   texture(t, uv + 0.375 * dx + 0.125 * dy) + texture(t, uv + 0.125 * dx - 0.375 * dy));
++}
++
+ #if USE_DISCARD
+ uniform bool  discardOpaque;
+ uniform bool  discardAlpha;
+@@ -74,9 +109,9 @@
+ #endif
+ #else
+ #if USE_RGBA
+-    vec4 pixColor = texture(tex, v_texcoord);
++    vec4 pixColor = (keystoneSize.x > 0.5) ? ksSampleAA(tex, v_texcoord) : texture(tex, v_texcoord);
+ #else
+-    vec4 pixColor = vec4(texture(tex, v_texcoord).rgb, 1.0);
++    vec4 pixColor = vec4(((keystoneSize.x > 0.5) ? ksSampleAA(tex, v_texcoord) : texture(tex, v_texcoord)).rgb, 1.0);
+ #endif
+ #if USE_BLUR_MATTE
+     float blurAlphaMask = clamp(texture(blurAlphaMatte, v_texcoord).r, 0.0, 1.0);
+@@ -159,6 +194,15 @@
+ #endif
+ #endif
+ 
++    float ksCov = keystoneCoverage();
++    // DISCARD the vacated corners (coverage ~0) outright. An OPAQUE window (easyeffects, XRGB
++    // GTK4) is drawn with GL blending OFF, so multiplying its alpha by the coverage does nothing
++    // -> square corners. discard removes the fragment regardless of blend state, so the rounded
++    // corner shows the backdrop. Blended (ARGB) windows still get the alpha feather below for AA;
++    // discarding only the fully-outside pixels keeps their smooth edge.
++    if (keystoneRound > 0.5 && ksCov < 0.004)
++        discard;
++    pixColor *= ksCov;
+     fragColor = pixColor;
+ #if USE_MIRROR
+ #if USE_TINT
+@@ -197,5 +241,6 @@
+ #endif
+ #endif
+ 
++    mirrorColor *= ksCov;
+ #endif
+ }
 diff -ruN a/src/render/shaders/glsl/tex300.vert b/src/render/shaders/glsl/tex300.vert
---- a/src/render/shaders/glsl/tex300.vert	2026-09-29 10:06:01.801515176 +0900
-+++ b/src/render/shaders/glsl/tex300.vert	2026-09-29 10:06:25.223010737 +0900
-@@ -12,7 +12,8 @@
+--- a/src/render/shaders/glsl/tex300.vert	2026-10-06 08:39:35.614492361 +0900
++++ b/src/render/shaders/glsl/tex300.vert	2026-10-06 08:39:35.671577308 +0900
+@@ -10,10 +10,17 @@
+ out vec4 v_color;
+ out vec2 v_texcoord;
  out vec2 v_texcoordMatte;
++// keystone: the unit-quad position (0..1 across the window), warped to the trapezoid
++// by proj. surface.frag uses it to compute an anti-aliased rounded-corner coverage in
++// window-local space -- consistent across the window texture AND the frost pass (which
++// carries a custom v_texcoord), so both get identical trapezoid edges.
++out vec2 v_boxUV;
  
  void main() {
 -    gl_Position = vec4(proj * vec3(pos, 1.0), 1.0);
@@ -205,11 +1012,20 @@ diff -ruN a/src/render/shaders/glsl/tex300.vert b/src/render/shaders/glsl/tex300
      v_color = color;
      v_texcoord = texcoord;
      v_texcoordMatte = texcoordMatte;
++    v_boxUV = pos;
+ }
 diff -ruN a/src/render/shaders/glsl/tex320.vert b/src/render/shaders/glsl/tex320.vert
---- a/src/render/shaders/glsl/tex320.vert	2026-09-29 10:06:01.803721021 +0900
-+++ b/src/render/shaders/glsl/tex320.vert	2026-09-29 10:06:25.237313241 +0900
-@@ -12,7 +12,8 @@
+--- a/src/render/shaders/glsl/tex320.vert	2026-10-06 08:39:35.614552318 +0900
++++ b/src/render/shaders/glsl/tex320.vert	2026-10-06 08:39:35.671644838 +0900
+@@ -10,10 +10,17 @@
+ out vec4 v_color;
+ out vec2 v_texcoord;
  out vec2 v_texcoordMatte;
++// keystone: the unit-quad position (0..1 across the window), warped to the trapezoid
++// by proj. surface.frag uses it to compute an anti-aliased rounded-corner coverage in
++// window-local space -- consistent across the window texture AND the frost pass (which
++// carries a custom v_texcoord), so both get identical trapezoid edges.
++out vec2 v_boxUV;
  
  void main() {
 -    gl_Position = vec4(proj * vec3(pos, 1.0), 1.0);
@@ -218,3 +1034,5 @@ diff -ruN a/src/render/shaders/glsl/tex320.vert b/src/render/shaders/glsl/tex320
      v_color = color;
      v_texcoord = texcoord;
      v_texcoordMatte = texcoordMatte;
++    v_boxUV = pos;
+ }

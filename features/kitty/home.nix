@@ -8,13 +8,17 @@ let
 in
 let
   # Kitty kittens from https://github.com/end-4/dots-hyprland (dots/.config/kitty/).
+  # PINNED to a commit, NOT `main`: a branch ref is a moving target -- when upstream edits these
+  # files on main, the fixed sha256 stops matching and the build breaks. Bump rev + re-run
+  # `nix-prefetch-url <raw url at the new rev>` for each file to update.
+  kittyRev = "33f31a08caddd41422a2d97670adeeb52b4f1e7c";
   kittySearchPy = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/end-4/dots-hyprland/main/dots/.config/kitty/search.py";
+    url = "https://raw.githubusercontent.com/end-4/dots-hyprland/${kittyRev}/dots/.config/kitty/search.py";
     # nix-prefetch-url output (base32); do not prefix with sha256- here
     sha256 = "15z1cs4wwxnvw96hkj7zl5wy7a26q8qnvc812vph93mnz9q2qsvq";
   };
   kittyScrollMarkPy = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/end-4/dots-hyprland/main/dots/.config/kitty/scroll_mark.py";
+    url = "https://raw.githubusercontent.com/end-4/dots-hyprland/${kittyRev}/dots/.config/kitty/scroll_mark.py";
     sha256 = "1a1l7sp2x247da8fr54wwq7ffm987wjal9nw2f38q956v3cfknzi";
   };
 in

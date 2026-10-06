@@ -40,7 +40,7 @@ let
       blender:
         values:
           - platform: linux
-            value: /snap/bin/blender
+            value: ${pkgs.blender}/bin/blender
   '';
 in
 lib.mkIf config.my.flamenco.enable {

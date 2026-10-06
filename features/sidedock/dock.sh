@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Side dock: floating windows tagged 'dock' live on a right-edge panel as a
-# CASCADE STACK. The front window sits at the panel base (opaque + raised); the
-# rest fan out behind it toward the lower-left (dimmed, peeking their edges). One
+# CASCADE STACK. The front window sits at the panel base (full opacity + raised); the
+# rest fan out behind it toward the lower-left (dimmed to ~0.62, peeking their edges).
+# Opacity is per-position and multiplies each app's own alpha (glass stays glass). One
 # keybind SHIFTS the pile -- the front rotates to the back and everything slides
 # one step, which Hyprland animates. Hiding parks the whole pile off the right
 # edge but remembers which window was in front, so the next cycle restores it.
@@ -20,11 +21,32 @@ HC=hyprctl; J=jq
 STATE="${XDG_RUNTIME_DIR:-/run/user/1000}/sidedock.front"   # remembers the front across hide
 
 geom() {
-  read -r W H X0 Y0 < <($HC monitors -j | $J -r '.[]|select(.focused)|"\(.width) \(.height) \(.x) \(.y)"')
-  # top-bar (waybar) height on this monitor, so the dock always clears it
+  # The dock lives on the RIGHTMOST edge of the WHOLE desktop -- the monitor whose logical
+  # right edge (x + width/scale) is furthest right -- so with multiple displays it's one fixed
+  # spot, not wherever focus happens to be. `monitors -j` reports PHYSICAL width/height plus a
+  # `scale`; Hyprland positions/sizes windows in LOGICAL coords = physical / scale (a 1920x1080
+  # panel at scale 0.8 is a 2400x1350 logical viewport). Divide by scale (jq does the float
+  # math -- awk/bc aren't on the wrapper PATH) so the dock tracks resolution AND scale changes.
+  # x/y are already logical. max_by picks the rightmost monitor; nothing is hardcoded to 1920.
+  read -r W H X0 Y0 < <($HC monitors -j | $J -r 'max_by(.x + (.width/(.scale//1)))|"\(.width/(.scale//1)|round) \(.height/(.scale//1)|round) \(.x) \(.y)"')
+  [ -n "${W:-}" ] && [ "$W" -gt 0 ] 2>/dev/null || { W=1920; H=1080; X0=0; Y0=0; }   # fallback
+  # top-bar (waybar) height on this monitor (already logical), so the dock clears it
   barH=$($HC layers -j | $J -r '[.[].levels|to_entries[].value[]|select(.namespace=="waybar")|.h]|max // 0')
-  HGAP=14; VGAP=48; DW=640           # right inset; top/bottom margin; panel width
-  DX=18; DY=14; MAXD=3               # cascade peek step (left,down) per depth; max visible depth
+  # panel width scales with the viewport (~1/3 of the logical width -> 640 on a 1920 view,
+  # 800 on a 2400 view), clamped so cards stay usable on very small / very large screens.
+  DW=$((W/3)); [ "$DW" -lt 420 ] && DW=420; [ "$DW" -gt 900 ] && DW=900
+  # Margins + cascade steps also scale with the viewport (were fixed 14/48/18/14 on a 1920
+  # view). HGAP=0 -> the front card sits FLUSH to the right screen edge (no gap/trim).
+  HGAP=$((W/60))                     # RIGHT INSET: how far the pile sits IN from the right
+                                     # edge (~40 logical on a 2400 view ~= 0.5cm physical).
+                                     # Divisor DOWN = more inset (W/30 ~1cm), UP = less.
+  VGAP=$((H/28))                     # top/bottom margin (~48 on a 1350-tall view)
+  # CASCADE DEPTH ("floating stack, receding"): back cards SHRINK by SHRINK% per depth and
+  # their CENTER stays on the front card's midline (NO diagonal-down) -- they only drift a
+  # little LEFT by DLEFT, so the pile reads as cards going back into the distance.
+  DLEFT=$((DW/30))                   # per-depth LEFT drift of the card center (slight)
+  SHRINK=9; MAXD=3                   # per-depth size shrink (%); deepest visible depth
+  STAGGER=0.035                      # seconds between cards on show/park -> a bit of "feel"
   DOCK_Y=$((Y0 + barH + VGAP))
   DOCK_H=$((H - barH - 2*VGAP))
   SHOWN_X=$((X0 + W - DW - HGAP))     # front (depth 0) x
@@ -39,10 +61,13 @@ snap() { CLIENTS=$($HC clients -j); }
 EXCLUDE=""
 # Dock-tagged windows: a rule tag renders as 'dock*', a dispatcher tag as 'dock';
 # rtrimstr collapses both. Sorted by address for a stable cycle order.
-order()    { $J -r --arg ex "$EXCLUDE" '[.[]|select((.tags|any(rtrimstr("*")=="dock")) and .address != $ex)|.address]|sort|.[]' <<<"$CLIENTS"; }
+# A "dock card" for the CASCADE = tagged dock but NOT pip. A PiP (my.sidedock keystone PiP)
+# is tagged dock too (so it gets the keystone look/shadow/input for free) but pip excludes it
+# from the pile, so it floats standalone wherever pip_make parked it.
+order()    { $J -r --arg ex "$EXCLUDE" '[.[]|select((.tags|any(rtrimstr("*")=="dock")) and (.tags|any(rtrimstr("*")=="pip")|not) and .address != $ex)|.address]|sort|.[]' <<<"$CLIENTS"; }
 # Current front = the on-screen dock window nearest the base (largest x).
-curfront() { $J -r --argjson px "$PARKED_X" '[.[]|select((.tags|any(rtrimstr("*")=="dock")) and (.at[0] < $px))]|max_by(.at[0])?|.address // ""' <<<"$CLIENTS"; }
-shownany() { $J -r --argjson px "$PARKED_X" 'any(.[]; (.tags|any(rtrimstr("*")=="dock")) and (.at[0] < $px))' <<<"$CLIENTS"; }
+curfront() { $J -r --argjson px "$PARKED_X" '[.[]|select((.tags|any(rtrimstr("*")=="dock")) and (.tags|any(rtrimstr("*")=="pip")|not) and (.at[0] < $px))]|max_by(.at[0])?|.address // ""' <<<"$CLIENTS"; }
+shownany() { $J -r --argjson px "$PARKED_X" 'any(.[]; (.tags|any(rtrimstr("*")=="dock")) and (.tags|any(rtrimstr("*")=="pip")|not) and (.at[0] < $px))' <<<"$CLIENTS"; }
 isfloat()  { $J -r --arg a "$1" 'first(.[]|select(.address==$a)).floating // false' <<<"$CLIENTS"; }
 exists()   { $J -e --arg a "$1" 'any(.[]; .address==$a)' <<<"$CLIENTS" >/dev/null 2>&1; }
 
@@ -60,12 +85,12 @@ nofocus() { d "hl.dsp.window.set_prop({prop=\"no_focus\", value=\"$2\", window=\
 ensure_float() { [ "$(isfloat "$1")" = "false" ] && d "hl.dsp.window.float({window=\"address:$1\"})"; }
 
 # Lay out the cascade with $1 as the front. Rotates the stable order so the front
-# is depth 0, places each window at its depth (front at base+opaque, the rest
+# is depth 0, places each window at its depth (front at base, full opacity; the rest
 # fanned+dimmed), raises deepest->front so the front lands on top, then focuses
 # the front. All placement is by address; only the final focus touches focus.
 render() {
-  local front="$1" i d dd x y
-  local -a ord rot
+  local front="$1" stagger="${2:-0}" i d dd x y cw ch cx cy op ov scp
+  local -a ord rot MX MY
   mapfile -t ord < <(order)
   [ ${#ord[@]} -eq 0 ] && return 1
   local fi=0
@@ -74,23 +99,30 @@ render() {
   # Floating is a prerequisite AND a toggle, so it can't go in the batch; dock
   # windows are already floating, so this is normally a no-op.
   local a; for a in "${rot[@]}"; do ensure_float "$a"; done
-  # Build ONE atomic batch (pin, move, opacity, focusability, then z-order, then
-  # focus). Sent as a single `hyprctl --batch`, the compositor commits it all in one
-  # frame -- so no window flashes to the top mid-shuffle. Doing the z-order raises as
-  # separate calls (a render between each) is what caused the collision flicker.
+  # Front card vertical CENTRE -- back cards keep this SAME midline (no diagonal-down);
+  # they only shrink and step a little LEFT, so their left edge peeks out to the left.
+  local CY0=$(( DOCK_Y + DOCK_H/2 ))
+  # ONE atomic batch (size, opacity, pin, focusability, z-order, focus) so nothing flashes
+  # to the top mid-shuffle. The MOVE is in the batch ONLY when not staggering; on show it
+  # is done per-card with a small delay below (the "feel"). NB back cards are ACTUAL smaller
+  # windows (min==max lock) -- the app reflows to that size; that's the cost of real shrink.
   local batch=""
   for ((i=0; i<${#rot[@]}; i++)); do
-    d=$i; dd=$(( d < MAXD ? d : MAXD ))
-    x=$(( SHOWN_X - dd*DX )); y=$(( DOCK_Y + dd*DY )); a="${rot[$i]}"
+    d=$i; dd=$(( d < MAXD ? d : MAXD )); a="${rot[$i]}"
+    scp=$(( 100 - dd*SHRINK )); [ "$scp" -lt 55 ] && scp=55     # depth shrink (% of front, floored)
+    cw=$(( DW*scp/100 )); ch=$(( DOCK_H*scp/100 ))
+    x=$(( SHOWN_X - dd*DLEFT ))                                 # LEFT edge steps slightly left (peek)
+    y=$(( CY0 - ch/2 ))                                         # vertically CENTERED on the front midline
+    MX[$i]=$x; MY[$i]=$y
+    if [ "$d" -eq 0 ]; then op="1.0 1.0"; else ov=$(( 60 - (dd-1)*14 )); [ "$ov" -lt 30 ] && ov=30; op="0.$ov 0.$ov"; fi
+    batch+="dispatch hl.dsp.window.set_prop({prop=\"max_size\", value=\"$cw $ch\", window=\"address:$a\"}) ; "
+    batch+="dispatch hl.dsp.window.set_prop({prop=\"min_size\", value=\"$cw $ch\", window=\"address:$a\"}) ; "
+    batch+="dispatch hl.dsp.window.resize({x=$cw, y=$ch, window=\"address:$a\"}) ; "
     batch+="dispatch hl.dsp.window.pin({action=\"on\", window=\"address:$a\"}) ; "
-    batch+="dispatch hl.dsp.window.move({x=$x, y=$y, window=\"address:$a\"}) ; "
-    if [ "$d" -eq 0 ]; then
-      batch+="dispatch hl.dsp.window.set_prop({prop=\"opacity\", value=\"1.0 1.0\", window=\"address:$a\"}) ; "
-      batch+="dispatch hl.dsp.window.set_prop({prop=\"no_focus\", value=\"false\", window=\"address:$a\"}) ; "
-    else
-      batch+="dispatch hl.dsp.window.set_prop({prop=\"opacity\", value=\"0.62 0.62\", window=\"address:$a\"}) ; "
-      batch+="dispatch hl.dsp.window.set_prop({prop=\"no_focus\", value=\"true\", window=\"address:$a\"}) ; "
-    fi
+    batch+="dispatch hl.dsp.window.set_prop({prop=\"opacity\", value=\"$op\", window=\"address:$a\"}) ; "
+    if [ "$d" -eq 0 ]; then batch+="dispatch hl.dsp.window.set_prop({prop=\"no_focus\", value=\"false\", window=\"address:$a\"}) ; "
+    else                   batch+="dispatch hl.dsp.window.set_prop({prop=\"no_focus\", value=\"true\", window=\"address:$a\"}) ; "; fi
+    [ "$stagger" != 1 ] && batch+="dispatch hl.dsp.window.move({x=$x, y=$y, window=\"address:$a\"}) ; "
   done
   # Raise deepest -> front so the front lands on top (all within the one frame).
   for ((i=${#rot[@]}-1; i>=0; i--)); do
@@ -98,6 +130,15 @@ render() {
   done
   batch+="dispatch hl.dsp.focus({window=\"address:${rot[0]}\"})"
   $HC --batch "$batch" >/dev/null 2>&1
+  # Staggered slide-in (show): front leads, each next card follows STAGGER later, so the
+  # pile fans in with a bit of feel instead of snapping as one block. (Sizes/z were set
+  # atomically above; only the visible position is staggered, so there is no flicker.)
+  if [ "$stagger" = 1 ]; then
+    for ((i=0; i<${#rot[@]}; i++)); do
+      d "hl.dsp.window.move({x=${MX[$i]}, y=${MY[$i]}, window=\"address:${rot[$i]}\"})"
+      [ "$i" -lt $(( ${#rot[@]} - 1 )) ] && sleep "$STAGGER" 2>/dev/null
+    done
+  fi
   printf '%s' "${rot[0]}" >"$STATE"
 }
 
@@ -106,32 +147,37 @@ park_all() {
   # pulls a pinned off-screen window back on-screen when the workspace changes -- so
   # a hidden-but-pinned dock would "reopen" on the next workspace switch. Unpinned +
   # parked, it stays put and out of sight; render() re-pins on show.
-  local a
-  while read -r a; do [ -n "$a" ] || continue
+  # Park BACK-to-FRONT with a small stagger so the pile ripples out instead of leaving as
+  # one block (matches the staggered slide-IN on show). order() is front..back, so reverse.
+  local -a o; mapfile -t o < <(order)
+  local a i
+  for ((i=${#o[@]}-1; i>=0; i--)); do a="${o[$i]}"; [ -n "$a" ] || continue
     ensure_float "$a"; pin "$a" off; mv "$a" "$PARKED_X" "$DOCK_Y"
-  done < <(order)
+    if [ "$i" -gt 0 ]; then sleep "$STAGGER" 2>/dev/null; fi
+  done
 }
 # Show the pile at the remembered front (falling back to the first window).
 show_pile() {
   local -a o; mapfile -t o < <(order); [ ${#o[@]} -eq 0 ] && return 1
   local want=""; [ -f "$STATE" ] && want="$(cat "$STATE" 2>/dev/null)"
   { [ -z "$want" ] || ! exists "$want"; } && want="${o[0]}"
-  render "$want"
+  render "$want" 1
 }
 active() { $J -r '.address // ""' < <($HC activewindow -j); }
 is_dock() { $J -e --arg a "$1" 'any(.[]; .address==$a and (.tags|any(rtrimstr("*")=="dock")))' <<<"$CLIENTS" >/dev/null 2>&1; }
+is_pip()  { $J -e --arg a "$1" 'any(.[]; .address==$a and (.tags|any(rtrimstr("*")=="pip")))'  <<<"$CLIENTS" >/dev/null 2>&1; }
 dock_send() {  # give a window the dock shape + tag, then lay it out as the front
   local a="$1"
   ensure_float "$a"
   d "hl.dsp.window.tag({tag=\"+dock\", window=\"address:$a\"})"
-  d "hl.dsp.window.resize({x=$DW, y=$DOCK_H, window=\"address:$a\"})"   # absolute fit
-  d "hl.dsp.window.set_prop({prop=\"min_size\", value=\"$DW $DOCK_H\", window=\"address:$a\"})"
-  d "hl.dsp.window.set_prop({prop=\"max_size\", value=\"$DW $DOCK_H\", window=\"address:$a\"})"
-  # Match the auto-route rule's chrome removal (border/shadow/blur render at the
-  # rectangular box, not the trapezoid, so they must be off): the RULE sets these
-  # for cfg.apps, but a manually-sent window (dolphin, a terminal) never hit it.
+  # (size + lock is applied by render(), from the live geometry -- not here.)
+  # Match the auto-route rule's chrome removal: BORDER + SHADOW render at the flat box
+  # (their own passes, not through the keystone) so they'd box the trapezoid -- strip
+  # them (decorate=false covers both). BLUR is deliberately LEFT ON: the frosted layer
+  # is drawn by renderTextureInternal, which the keystone hook warps, so the frost
+  # follows the trapezoid and a glass window reads as GLASS. The RULE strips chrome for
+  # cfg.apps; a manually-sent window (dolphin, a terminal) never hit it, so do it here.
   d "hl.dsp.window.set_prop({prop=\"decorate\", value=\"false\", window=\"address:$a\"})"
-  d "hl.dsp.window.set_prop({prop=\"no_blur\", value=\"true\", window=\"address:$a\"})"
   d "hl.dsp.window.set_prop({prop=\"no_shadow\", value=\"true\", window=\"address:$a\"})"
   snap; render "$a"
 }
@@ -150,6 +196,12 @@ undock() {  # strip the dock shape/tag and return a window to the tiling area
   d "hl.dsp.window.set_prop({prop=\"decorate\", value=\"true\", window=\"address:$a\"})"
   d "hl.dsp.window.set_prop({prop=\"no_blur\", value=\"false\", window=\"address:$a\"})"
   d "hl.dsp.window.set_prop({prop=\"no_shadow\", value=\"false\", window=\"address:$a\"})"
+  # Restore corner ROUNDING. The dock route-rule (sidedock/home.nix) pins rounding=0 so the
+  # keystone SHADER owns the corners while docked; that per-window override survives undock,
+  # leaving the window square in the tiling area. Re-apply the live GLOBAL rounding so it
+  # rounds like every other window (read it, don't hardcode, so it tracks decoration:rounding).
+  local grnd; grnd=$($HC getoption decoration:rounding -j 2>/dev/null | $J -r '.int // 10')
+  d "hl.dsp.window.set_prop({prop=\"rounding\", value=$grnd, window=\"address:$a\"})"
   d "hl.dsp.window.tag({tag=\"-dock\", window=\"address:$a\"})"
   # Tile it: read LIVE float state (not the pre-undock snapshot) and unfloat if
   # still floating, so it joins the layout like any normal app.
@@ -165,6 +217,63 @@ undock() {  # strip the dock shape/tag and return a window to the tiling area
   d "hl.dsp.focus({window=\"address:$a\"})"
 }
 
+pip_make() {  # turn $1 into a keystone PiP: a standalone, pinned, tilted mini-card, bottom-right.
+  local a="$1"
+  ensure_float "$a"
+  d "hl.dsp.window.tag({tag=\"+dock\", window=\"address:$a\"})"  # +dock => keystone tilt/shadow/input, all free
+  d "hl.dsp.window.tag({tag=\"+pip\", window=\"address:$a\"})"   # +pip  => the cascade (order/curfront/shownany) skips it
+  # strip chrome like dock_send: border/shadow are flat-box passes, the keystone owns the look
+  d "hl.dsp.window.set_prop({prop=\"decorate\", value=\"false\", window=\"address:$a\"})"
+  d "hl.dsp.window.set_prop({prop=\"no_shadow\", value=\"true\", window=\"address:$a\"})"
+  # ~1/3 of the viewport wide, KEEPING the window's current aspect, parked bottom-right (right
+  # edge inset by HGAP so the keystone's flush right edge sits just off the screen edge).
+  local cw ch pw ph px py mw mh
+  read -r cw ch < <($J -r --arg a "$a" 'first(.[]|select(.address==$a))|"\(.size[0]) \(.size[1])"' <<<"$CLIENTS")
+  { [ -n "${cw:-}" ] && [ "$cw" -gt 0 ] 2>/dev/null; } || { cw=16; ch=9; }
+  # Fit the window's aspect INSIDE a small max box (~1/3 of the viewport each way) so a PiP is
+  # always a MINI card. Capping width alone left a tall window near full-height (= a dock card).
+  # min(mw/cw, mh/ch) via cross-multiply: whichever dimension is the tighter fit wins.
+  mw=$((W/3)); mh=$((H/3))
+  if [ $(( mw * ch )) -le $(( mh * cw )) ]; then pw=$mw; ph=$(( mw * ch / cw ));
+  else                                          ph=$mh; pw=$(( mh * cw / ch )); fi
+  px=$(( X0 + W - pw - HGAP )); py=$(( Y0 + H - ph - VGAP ))
+  # Clear the min FIRST (a prior dock/pip lock could be larger than the new PiP size, which would
+  # clamp the resize), then set max, resize down, and re-lock min == max at the PiP size.
+  d "hl.dsp.window.set_prop({prop=\"min_size\", value=\"0 0\", window=\"address:$a\"})"
+  d "hl.dsp.window.set_prop({prop=\"max_size\", value=\"$pw $ph\", window=\"address:$a\"})"
+  d "hl.dsp.window.resize({x=$pw, y=$ph, window=\"address:$a\"})"
+  d "hl.dsp.window.set_prop({prop=\"min_size\", value=\"$pw $ph\", window=\"address:$a\"})"
+  pin "$a" on
+  mv "$a" "$px" "$py"
+  ztop "$a"
+  # If $a was a pile member (SUPER+U straight from the dock = the "pin clears dock" half), the
+  # cascade now has a gap -- re-flow the survivors (order() already excludes this +pip window),
+  # then hand focus back to the PiP.
+  snap
+  if [ "$(shownany)" = "true" ]; then
+    local -a o; mapfile -t o < <(order)
+    [ ${#o[@]} -gt 0 ] && render "${o[0]}"
+  fi
+  d "hl.dsp.focus({window=\"address:$a\"})"
+}
+unpip() {  # return a PiP to the tiling area -- drop the pip tag, then reuse undock's full restore
+  local a="$1"
+  d "hl.dsp.window.tag({tag=\"-pip\", window=\"address:$a\"})"
+  undock "$a"
+}
+dock_from_pip() {  # SUPER+SHIFT+D on a PiP: fold it into the cascade pile instead of undocking it.
+  # pin and dock are mutually exclusive, so docking a pinned window clears the pin. Drop the
+  # standalone `pip` marker + its mini size-lock, but KEEP the `dock` tag (= the keystone look)
+  # and the pin-on; then let render() resize it to the pile card size as the new front. Without
+  # this, SUPER+SHIFT+D hit undock() (a PiP carries `dock` too) and stranded it out of the pile,
+  # still pip-tagged + mini-sized -- the limbo this whole change removes.
+  local a="$1"
+  d "hl.dsp.window.tag({tag=\"-pip\", window=\"address:$a\"})"
+  d "hl.dsp.window.set_prop({prop=\"min_size\", value=\"0 0\", window=\"address:$a\"})"
+  d "hl.dsp.window.set_prop({prop=\"max_size\", value=\"99999 99999\", window=\"address:$a\"})"
+  snap; render "$a"
+}
+
 geom; snap
 case "${1:-toggle}" in
   toggle)   # SUPER+D: show the pile if hidden, park it if shown
@@ -173,6 +282,15 @@ case "${1:-toggle}" in
       park_all
     else
       show_pile
+    fi ;;
+  show)     # directional gesture (3-finger swipe toward the dock): reveal the pile.
+            # Idempotent -- a no-op if it is already shown, so repeated swipes don't flicker.
+    [ "$(shownany)" = "true" ] || show_pile ;;
+  hide)     # directional gesture (3-finger swipe away): hide the pile. Remembers the front
+            # (like toggle) so the next show restores it. No-op if already hidden.
+    if [ "$(shownany)" = "true" ]; then
+      cur="$(curfront)"; [ -n "$cur" ] && printf '%s' "$cur" >"$STATE"
+      park_all
     fi ;;
   next|prev)   # SUPER+right / SUPER+left while focused on the dock: shift the pile
     mapfile -t ORD < <(order)
@@ -183,11 +301,46 @@ case "${1:-toggle}" in
     for i in "${!ORD[@]}"; do [ "${ORD[$i]}" = "$cur" ] && ci=$i && break; done
     if [ "$1" = "next" ]; then ni=$(( (ci+1) % ${#ORD[@]} )); else ni=$(( (ci-1+${#ORD[@]}) % ${#ORD[@]} )); fi
     render "${ORD[$ni]}" ;;
-  dock-toggle)   # SUPER+SHIFT+D: dock the focused window, or undock it if docked
+  gesture-move)  # 4-finger drag ($2 = l/r/u/d, the dominant axis). Focused ON a dock card ->
+                 # SHIFT the pile (l=prev, r=next, same as SUPER+left/right); anywhere else ->
+                 # move the focused window like the old 4-finger "move" gesture (dwindle swap).
     a="$(active)"; [ -z "$a" ] && exit 0
-    if is_dock "$a"; then undock "$a"; else dock_send "$a"; fi ;;
-  adopt)   # a dock window ($2) just OPENED: bring it to the front and re-cascade
-    is_dock "$2" || exit 0
+    if is_dock "$a" && ! is_pip "$a"; then   # a PiP carries `dock` but isn't in the pile -> move it, don't shift
+      [ "$(shownany)" = "true" ] || exit 0
+      mapfile -t ORD < <(order); [ ${#ORD[@]} -le 1 ] && exit 0
+      cur="$(curfront)"; ci=0
+      for i in "${!ORD[@]}"; do [ "${ORD[$i]}" = "$cur" ] && ci=$i && break; done
+      case "${2:-}" in
+        r) render "${ORD[$(( (ci+1) % ${#ORD[@]} ))]}" ;;
+        l) render "${ORD[$(( (ci-1+${#ORD[@]}) % ${#ORD[@]} ))]}" ;;
+      esac   # vertical on a dock card: ignored
+    else
+      case "${2:-}" in l|r|u|d) $HC dispatch movewindow "$2" ;; esac
+    fi ;;
+  dock-toggle)   # SUPER+SHIFT+D: toggle the focused window's DOCK membership. pin and dock are
+                 # mutually exclusive: a PiP (pin) folds into the pile (clearing the pin); a pile
+                 # window undocks; a normal window docks. Check pip FIRST -- a PiP also carries the
+                 # `dock` tag (for the keystone), so is_dock would otherwise catch it and undock it
+                 # into limbo (out of the pile but still pip-tagged + mini-sized -- the old bug).
+    a="$(active)"; [ -z "$a" ] && exit 0
+    if   is_pip  "$a"; then dock_from_pip "$a"
+    elif is_dock "$a"; then undock "$a"
+    else                    dock_send "$a"; fi ;;
+  pip-toggle)    # SUPER+U: toggle the focused window as a keystone picture-in-picture / "pin" --
+                 # a standalone, pinned, tilted mini-card bottom-right -- or return it to the layout
+                 # if already pinned. pip_make clears pile membership (the "pin clears dock" half).
+    a="$(active)"; [ -z "$a" ] && exit 0
+    if is_pip "$a"; then unpip "$a"; else pip_make "$a"; fi ;;
+  adopt)   # a dock-class window ($2) just OPENED. The Lua handler recognises it by
+           # CLASS (the auto-route rule no longer tags -- see sidedock/home.nix), so
+           # give it the DYNAMIC dock tag here: a rule tag renders as "dock*" and
+           # CANNOT be removed by the tag dispatcher, so undock could never release a
+           # route-tagged window (it stayed docked + keystoned with its border back).
+           # A dispatcher tag ("dock") is removable, so undock works like a sent window.
+           # Re-snapshot after tagging so order() sees it, then cascade it to the front.
+    exists "$2" || exit 0
+    d "hl.dsp.window.tag({tag=\"+dock\", window=\"address:$2\"})"
+    snap
     render "$2" ;;
   orphan)  # a dock window ($2) just CLOSED: re-flow the survivors (if the pile is up)
     EXCLUDE="$2"; snap
@@ -198,4 +351,14 @@ case "${1:-toggle}" in
     if [ -z "$want" ] || [ "$want" = "$EXCLUDE" ] || ! printf '%s\n' "${ORD[@]}" | grep -qxF "$want"; then want="${ORD[0]}"; fi
     [ "$(shownany)" = "true" ] && render "$want"
     printf '%s' "$want" >"$STATE" ;;
+  relayout)  # the monitor layout/scale changed (e.g. wdisplays) -> re-apply the CURRENT
+             # geometry in place from the fresh geom(), so a live resolution/scale change
+             # auto-adjusts the pile with no keypress. Shown -> re-cascade at the new size/
+             # position; parked -> re-park at the new (logical) off-screen x.
+    if [ "$(shownany)" = "true" ]; then
+      cur="$(curfront)"; { [ -z "$cur" ] || ! exists "$cur"; } && cur="$(order | head -1)"
+      [ -n "$cur" ] && render "$cur"
+    else
+      park_all
+    fi ;;
 esac

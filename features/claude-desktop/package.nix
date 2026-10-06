@@ -166,11 +166,22 @@ stdenv.mkDerivation {
     # No NIXOS_OZONE_WL gate: this config is Wayland-only, and native Wayland
     # is required for fcitx5 input (--enable-wayland-ime). The WAYLAND_DISPLAY
     # guard keeps a plain-X11 session working.
+    #
+    # WaylandFractionalScaleV1 is DISABLED on purpose. Chromium's fractional-scale
+    # support targets HiDPI (scale > 1); at a DOWNSCALE (this host runs 0.6-0.8) it is
+    # on by default but broken -- it builds a physical-sized buffer (scale x logical)
+    # and never scales it up to the logical window, so the UI fills only the scale
+    # fraction (measured: exactly 0.8 of the window at scale 0.8) and the rest shows
+    # the blurred desktop ("gigantic frosted margin on the right + bottom"). Disabling
+    # it drops Chromium to integer buffer_scale=1: it renders at the logical window size
+    # and Hyprland downscales the whole window -> the content fills edge-to-edge at any
+    # scale (verified by grim: disabled = full-bleed, enabled/default = 0.8 fill). At 1x
+    # there's nothing to mis-scale, which is why only 1x ever looked right.
     rm $out/bin/claude-desktop
     makeWrapper $out/lib/claude-desktop/claude-desktop $out/bin/claude-desktop \
       --prefix XDG_DATA_DIRS : $GSETTINGS_SCHEMAS_PATH \
       --suffix PATH : ${lib.makeBinPath [ xdg-utils glib ]} \
-      --add-flags "\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations,WebRTCPipeWireCapturer --enable-wayland-ime=true}"
+      --add-flags "\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations,WebRTCPipeWireCapturer --disable-features=WaylandFractionalScaleV1 --enable-wayland-ime=true}"
 
     substituteInPlace $out/share/applications/com.anthropic.Claude.desktop \
       --replace-fail "Exec=claude-desktop" "Exec=$out/bin/claude-desktop"

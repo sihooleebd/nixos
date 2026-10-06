@@ -57,6 +57,35 @@ in
         config to another host.
       '';
     };
+
+    font = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.submodule {
+          options = {
+            family = lib.mkOption {
+              type = lib.types.str;
+              description = ''Doom font family (e.g. "JetBrainsMonoNL Nerd Font").'';
+            };
+            size = lib.mkOption {
+              type = lib.types.int;
+              description = "Doom font size in px, tuned to this machine's display.";
+            };
+            weight = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''Optional doom-font :weight (e.g. "semi-light"); variable-pitch stays default.'';
+            };
+          };
+        }
+      );
+      default = null;
+      description = ''
+        Per-machine Doom font. When set, generates the doom-machine-local.el hook that pins doom-font
+        + doom-variable-pitch-font and reloads -- the common per-host tweak, so a host writes
+        `my.emacs.font = { family; size; }` instead of hand-copying the same defun. Prepended to
+        machineLocalElisp, which stays free-form for anything else.
+      '';
+    };
   };
 
   # Accounts this feature applies to; defaults to the primary user.

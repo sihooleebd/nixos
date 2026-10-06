@@ -63,7 +63,6 @@ lib.mkIf (osConfig.my.starship.enable && inScope) {
       hostname = {
         ssh_only = false;
         format = "[•$hostname](bg:252 bold fg:235)[](bold fg:252)";
-        trim_at = ".companyname.com";
         disabled = false;
       };
 

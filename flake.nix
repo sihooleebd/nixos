@@ -65,7 +65,9 @@
     # (packages.<system>.default) on dell-latitude. No nixpkgs.follows: let it
     # build against its own pin so the author's binary cache applies, rather
     # than forcing it onto this flake's nixpkgs.
-    sonora.url = "github:nolight132/sonora";
+    # Benjamin's bugfixed fork (same app: binary + app-id stay "sonora", so the dock route and the
+    # my.sidedock app-class references are unchanged -- only the source moves).
+    sonora.url = "github:sihooleebd/sononora/feat/niche-fixes-and-features";
 
   };
 

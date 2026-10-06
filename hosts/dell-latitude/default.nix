@@ -5,8 +5,6 @@
     ./hardware-configuration.nix
   ];
 
-  services.tailscale.enable = true;
-
   /*
     Laptop system upgrades (plain NixOS options -- machine-appropriate, not
     feature-worthy):
@@ -25,6 +23,9 @@
   */
   services.thermald.enable = true;
   services.fwupd.enable = true;
+  # usbmuxd: iOS-device USB multiplexing daemon -- the USB transport for opendisplay-linux
+  # (iPad-as-display over a cable). Wi-Fi discovery already works via services.avahi (on).
+  services.usbmuxd.enable = true;
   zramSwap.enable = true;
 
   # Portable microcode. The Latitude is Intel (its hardware-config pulls the
@@ -33,6 +34,14 @@
   # intel-ucode; each CPU's early loader applies only its own, so this is free
   # on the Latitude and gives the Ryzen its microcode updates meanwhile.
   hardware.cpu.amd.updateMicrocode = true;
+
+  # Intel VAAPI driver (iHD_drv_video.so) for hardware video de/encode on the Latitude's
+  # Intel GPU (Comet Lake / UHD, Gen9.5 -> intel-media-driver). Without it
+  # /run/opengl-driver/lib/dri ships only the mesa gallium drivers (no Intel VAAPI), so
+  # vainfo and any h264_vaapi encode fail ("va_openDriver() returns -1") -- which is what
+  # broke opendisplay-linux's hardware H.264. libva on NixOS searches that dir, so dropping
+  # the driver in is the whole fix; it then falls back from iHD cleanly on non-Intel hosts.
+  hardware.graphics.extraPackages = [ pkgs.intel-media-driver ];
 
   # Wacom One Pen Display 13: the configuration GUI. There is NO Wacom Desktop
   # Center on Linux, and the KDE/GNOME Wacom panels need X11/GNOME -- so on this
@@ -57,34 +66,9 @@
   */
   programs.steam.enable = true;
 
-  /*
-    Syncthing, running as benjamin. overrideDevices/overrideFolders = false so
-    the pairings and folders added through the web UI (http://localhost:8384)
-    are the source of truth -- Nix only turns the daemon on and does not
-    reconcile its contents away on the next rebuild. Reachable across the
-    tailnet like any other service on this host.
-  */
-  services.syncthing = {
-    enable = true;
-    user = "benjamin";
-    group = "users";
-    dataDir = "/home/benjamin";
-    configDir = "/home/benjamin/.config/syncthing";
-    # Open the firewall for sync (22000 tcp/udp) + local discovery (21027 udp),
-    # so direct/LAN peers connect without relaying. Tailscale peers (yulee) work
-    # regardless; this just covers the non-tailnet case.
-    openDefaultPorts = true;
-    overrideDevices = false;
-    overrideFolders = false;
-  };
-
-  # Raise the inotify watch ceiling for Syncthing. Without enough watches a
-  # large synced folder can't be watched live and Syncthing falls back to slow
-  # periodic rescans. The common "204800" advice assumes the old ~8k default,
-  # but this kernel already scales it to 524288 by RAM -- so pin it HIGHER
-  # (1048576) to be a genuine increase, not a downgrade. It's only a ceiling;
-  # kernel memory is charged per watch actually taken (~1 KiB each).
-  boot.kernel.sysctl."fs.inotify.max_user_watches" = 1048576;
+  # Syncthing (+ the inotify-watch ceiling bump) is now the my.syncthing feature, running as the
+  # primary user (benjamin). Enabled via the toggle in the `my` block below. Pairings/folders are
+  # still managed through the web UI (http://localhost:8384); Nix only runs the daemon.
 
   # Keyboard backlight auto-off: the EC turns it off after `stop_timeout` of no
   # keyboard/touchpad input (default 10s -- too eager when reading). Bump to
@@ -96,41 +80,16 @@
     ACTION=="add", SUBSYSTEM=="leds", KERNEL=="dell::kbd_backlight", ATTR{stop_timeout}="2m"
   '';
 
-  /*
-    Caps Lock as the macOS-style language toggle.
-
-    keyd rewrites at the evdev/uinput layer, so a TAP of Caps emits the Hangul
-    key -- which features/hyprland already binds to the fcitx keyboard-us <->
-    hangul switch (hl.bind("Hangul", ...)) -- and a HOLD past 200ms is a real
-    Caps Lock, the "leave it as long press" fallback. Nothing else is remapped.
-
-    my.keyd.enable stays false ON PURPOSE: that feature is the HHKB layout
-    (Caps -> Ctrl/Esc, RAlt -> Hangul), a different intent. This is one key,
-    so services.keyd is set directly here rather than by flipping on a layout
-    this host does not want. keyd applies everywhere -- TTY, greeter,
-    compositor -- because it rewrites before any session sees the key.
-  */
-  services.keyd = {
-    enable = true;
-    keyboards.default = {
-      ids = [ "*" ];
-      # Plain remap, NOT timeout(hangeul, 200, capslock). The tap-hold macro
-      # made keyd hold events for up to 200ms to disambiguate tap vs hold,
-      # which (a) delayed the language toggle -- the first key typed after a
-      # switch beat the Hangul emit and landed in the old language -- and
-      # (b) buffered near-simultaneous keys, reordering them (typing ㅛ then ㅇ
-      # arrived as ㅇㅛ and composed to 요). A 1:1 remap emits Hangul the
-      # instant Caps is pressed and never buffers. The hold-for-real-capslock
-      # is dropped, which is fine: this key is never used for capslock here.
-      settings.main.capslock = "hangeul";
-    };
-  };
+  # Caps Lock as the macOS-style language toggle: my.keyd.layout = "capsHangul" emits the Hangul key
+  # on a plain Caps press (which features/hyprland binds to the fcitx us<->hangul switch), everywhere
+  # (TTY/greeter/compositor), via the keyd feature. See my.keyd below + features/keyd for the "plain
+  # remap, not a tap-hold macro" rationale. (The "hhkb" layout is the other, unrelated intent.)
 
   system.stateVersion = "26.05";
 
   # Kernel choice stays in the host file: it is a property of this machine's
   # hardware, not of any feature.
-  boot.kernelPackages = pkgs.linuxPackages_7_1;
+  boot.kernelPackages = pkgs.linuxPackages_7_2;
 
   my = {
     /*
@@ -172,10 +131,20 @@
 
     upower.enable = true;
     fonts.enable = true;
-    keyd.enable = false;
+    keyd = {
+      enable = true;
+      layout = "capsHangul";
+    };
     pipewire.enable = true;
     libinput.enable = true;
     swapfile.enable = true;
+    syncthing.enable = true;
+    tailscale = {
+      enable = true;
+      # tailscaled sometimes drops the tailnet and doesn't recover on its own; restart it when a
+      # disconnect persists across two checks (`sudo systemctl restart tailscaled.service`).
+      watchdog.enable = true;
+    };
     discovery.enable = true;
     locale.enable = true;
     firefox.enable = true;
@@ -237,6 +206,13 @@
       cowork.enable = true;
     };
 
+    globaltun = {
+      enable = true;
+      jump = "r0k0r@172.30.0.215";
+      remote = "root@192.168.0.100";
+      sshKey = "/etc/nix/remote-builder/ssh_key";
+      remoteSocksPort = 1083;
+    };
     /*
       Offload builds to yulee, as benjamin.
 
@@ -280,13 +256,6 @@
       lever that works; --builders cannot reach the eval step. See the
       `enable` option's description for why.
     */
-    globaltun = {
-      enable = true;
-      jump = "r0k0r@172.30.0.215";
-      remote = "root@192.168.0.100";
-      sshKey = "/etc/nix/remote-builder/ssh_key";
-      remoteSocksPort = 1083;
-    };
     remote-builder.client = {
       enable = true;
       wrappers.enable = true;
@@ -318,13 +287,27 @@
       my.packages.extra's own docs on why lookup.nix cannot read a mkIf here.
     */
     packages.extra.user = with pkgs; [
-      fastfetch
+      # xfetch (the fish greeting, replacing fastfetch) -- packaged in-flake because no nix-ld here.
+      (callPackage ../../features/xfetch/package.nix { })
       kdePackages.okular
       btop # hakuspace's theme pipeline already writes ~/.config/btop themes
       gimp
       qalculate-qt # calculator (Qt build -- themes via qt6ct like the KDE apps)
       lunar-client # Minecraft client/launcher
       discord
+
+      # orbit: Benjamin's own terminal music player, built from source. Packaged
+      # (not `cargo install`ed) because this host has no nix-ld, so a cargo binary
+      # linking libasound/libdbus would build but fail to RUN; buildRustPackage
+      # embeds the rpath. See features/orbit/package.nix -- bump rev/hash + Cargo.lock
+      # there to update.
+      (callPackage ../../features/orbit/package.nix { })
+
+      # opendisplay-linux (tixwho fork): use an iPhone/iPad as an extra Wayland display.
+      # Linux sender (PipeWire + portal capture -> H.264 -> iOS receiver). See
+      # features/opendisplay/package.nix. RUNTIME also needs services.avahi (Wi-Fi) and/or
+      # services.usbmuxd (USB) + the Hyprland screencast portal (already present).
+      (callPackage ../../features/opendisplay/package.nix { })
 
       # linecast (ashuttl/linecast): terminal weather/tides/sun/moon/radar.
       # Not in nixpkgs; packaged straight from PyPI. Pure Python, hatchling
@@ -423,7 +406,12 @@
       # wrapped copy for the bar underbar; this puts `cava` on PATH too)
     ];
 
-    power.enable = true;
+    power = {
+      enable = true;
+      # Snappy-but-quiet: full turbo for bursts, calm fan under sustained load. Flip to
+      # "performance" for max sustained clocks (louder) or "powersave" for coolest/quietest.
+      profile = "performance";
+    };
     flatpak.enable = true;
     easyeffects = {
       enable = true;
@@ -437,18 +425,10 @@
 
     boot.enable = true;
 
-    emacs.machineLocalElisp = ''
-      ;;; -*- lexical-binding: t; -*-
-      ;;; Loaded by Doom `config.el` from ~/.config/home-manager/doom-machine-local.el
-
-      (defun my/machine-local-reset-fonts-h ()
-        (setq doom-font (font-spec :family "DepartureMono Nerd Font" :size 16)
-              doom-variable-pitch-font (font-spec :family "DepartureMono Nerd Font" :size 16))
-        (when (fboundp 'doom-init-fonts-h)
-          (doom-init-fonts-h 'reload)))
-
-      (add-hook 'emacs-startup-hook #'my/machine-local-reset-fonts-h)
-    '';
+    emacs.font = {
+      family = "DepartureMono Nerd Font";
+      size = 16;
+    };
 
     greetd.enable = true;
     qt-theming.enable = true;
@@ -457,7 +437,7 @@
     desktop = {
       compositor = "hyprland";
       primaryOutput = "eDP-1";
-      primaryOutputScale = "1";
+      primaryOutputScale = "0.8";
     };
 
     /*

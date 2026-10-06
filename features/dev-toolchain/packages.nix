@@ -43,6 +43,11 @@
     clang-tools # clangd LSP + clang-format/clang-tidy
     gcc
     gdb
+    # Rust: cargo + rustc (cargo can't compile without the toolchain), rust-analyzer the
+    # LSP (matching clangd/basedpyright above). clippy/rustfmt are a line away if wanted.
+    cargo
+    rustc
+    rust-analyzer
     tinymist
     typst
   ];

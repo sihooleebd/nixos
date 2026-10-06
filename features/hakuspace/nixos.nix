@@ -46,5 +46,15 @@ in
       provides = [ "shell" ];
       enabledBy = cfg.enable;
     };
+
+    # hyprlock (the lock screen, via lock.sh in home.nix) authenticates against the
+    # PAM service "hyprlock". With no such service defined, hyprlock's OWN fallback is
+    # /etc/pam.d/su -- which drags in pam_faillock (failure lockout + delays on auth)
+    # and, worse, pam_xauth in the SESSION stack (spawns the `xauth` binary on every
+    # successful unlock -- slow, and pointless on Wayland). That is the "hangs/lags
+    # before admitting" on a correct password. A dedicated minimal service gives the
+    # clean default pam_unix stack (no su baggage, no xauth, no faillock), so unlock is
+    # fast. This is the standard NixOS hyprlock fix. Gated with the shell.
+    security.pam.services.hyprlock = lib.mkIf cfg.enable { };
   };
 }

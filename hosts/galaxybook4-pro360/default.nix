@@ -5,8 +5,6 @@
     ./hardware-configuration.nix
   ];
 
-  services.tailscale.enable = true;
-
   system.stateVersion = "26.05";
 
   # Kernel choice stays in the host file: it is a property of this machine's
@@ -54,6 +52,7 @@
     pipewire.enable = true;
     libinput.enable = true;
     swapfile.enable = true;
+    tailscale.enable = true;
     discovery.enable = true;
     locale.enable = true;
     firefox.enable = true;
@@ -231,18 +230,11 @@
     # features/_meta asserts my.agenix.enable alongside this.
     emacs.authinfoSecret = ../../age/authinfo.age;
 
-    emacs.machineLocalElisp = ''
-      ;;; -*- lexical-binding: t; -*-
-      ;;; Loaded by Doom `config.el` from ~/.config/home-manager/doom-machine-local.el
-
-      (defun my/machine-local-reset-fonts-h ()
-        (setq doom-font (font-spec :family "JetBrainsMonoNL Nerd Font" :size 13 :weight 'semi-light)
-              doom-variable-pitch-font (font-spec :family "JetBrainsMonoNL Nerd Font" :size 13))
-        (when (fboundp 'doom-init-fonts-h)
-          (doom-init-fonts-h 'reload)))
-
-      (add-hook 'emacs-startup-hook #'my/machine-local-reset-fonts-h)
-    '';
+    emacs.font = {
+      family = "JetBrainsMonoNL Nerd Font";
+      size = 13;
+      weight = "semi-light";
+    };
 
     greetd.enable = true;
     qt-theming.enable = true;

@@ -94,6 +94,43 @@ let
   # (identical override, deduped by the store): home.packages puts it on the
   # profile, and networkmanager-dmenu's config names it absolutely.
   rofiEmoji = pkgs.rofi.override { plugins = [ pkgs.rofi-emoji ]; };
+
+  # hyprlock background: a fixed PNG that always mirrors the CURRENT wallpaper, so the
+  # lock screen shows the (blurred, dimmed) wallpaper -- NOT a screenshot of the live
+  # desktop (upstream's `path = screenshot`, which leaks whatever windows were open; see
+  # hyprlockNoText). awww caches the active image PATH per output in a small BINARY file
+  # ~/.cache/awww/<ver>/<output> (NUL-separated fields; the last is the absolute image
+  # path). hyprlockBgGen resolves that and re-encodes to a fixed JPEG (hyprlock loads by
+  # extension and the source may be jpg/png/...; the bg is blurred+dimmed anyway, so JPEG
+  # is smaller/faster than a lossless PNG). It runs at session start (appended to the
+  # wallpaper-restore ExecStartPost) and on every wallpaper change (the systemd .path
+  # watcher below), so hyprlock loads the file INSTANTLY at lock time -- no per-lock
+  # conversion, no window of a bright/unlocked screen while it works.
+  hyprlockBg = "${config.home.homeDirectory}/.cache/hyprlock-bg.jpg";
+  hyprlockBgGen = pkgs.writeShellScript "hakuspace-hyprlock-bg-gen" ''
+    export PATH=${lib.makeBinPath [ pkgs.imagemagick pkgs.coreutils pkgs.gnugrep ]}:$PATH
+    cache="$HOME/.cache/awww/${pkgs.awww.version}/eDP-1"
+    [ -s "$cache" ] || cache=$(ls "$HOME/.cache/awww/${pkgs.awww.version}/"* 2>/dev/null | head -1)
+    [ -s "$cache" ] || exit 0
+    # Binary cache: \0crop:<pos>\0<filter>\0<ABS IMAGE PATH>. Pull the path as the LAST
+    # run of non-control bytes starting with '/' (robust to NUL separators AND spaces in
+    # the path). A video wallpaper caches a color, not a path -> no match -> keep the
+    # previous file rather than clobbering it.
+    src=$(grep -aoE '/[^[:cntrl:]]+' "$cache" | tail -1)
+    [ -n "$src" ] && [ -f "$src" ] || exit 0
+    out="${hyprlockBg}"
+    tmp="$out.tmp.$$"
+    # Shrink only if huge (cap the long edge ~2560) to keep hyprlock's load light; do NOT
+    # pre-blur/dim -- hyprlock applies its own blur + brightness. The `jpg:` coder prefix
+    # FORCES JPEG output: without it magick picks the format from the tmp file's extension
+    # (here ".tmp.$$", unknown) and silently falls back to the INPUT format -- a .jpg named
+    # file holding the wrong bytes. Atomic via tmp + mv.
+    if magick "$src" -resize '2560x2560>' -quality 88 jpg:"$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$out"
+    else
+      rm -f "$tmp"
+    fi
+  '';
 in
 {
   imports = [
@@ -471,13 +508,50 @@ in
             readarray -t args < "$state"
             (${pkgs.mpvpaper}/bin/mpvpaper "''${args[@]}" >/dev/null 2>&1 &)
           fi
+          # Seed the hyprlock lock-screen background from the just-restored wallpaper;
+          # the .path watcher keeps it current afterwards. || true so a first boot with
+          # no wallpaper doesn't fail the unit.
+          ${hyprlockBgGen} || true
           exit 0
         '';
+      };
+      # Regenerate the hyprlock background when the wallpaper changes. NOT the `oneshot`
+      # helper: it sets RemainAfterExit=true, which would make a SECOND .path trigger a
+      # no-op (unit already "active") -- so a wallpaper change wouldn't refresh the lock
+      # bg. Plain re-runnable oneshot, no Install (only the .path below starts it; startup
+      # generation is the wallpaper-restore ExecStartPost just above).
+      hakuspace-hyprlock-bg = {
+        Unit = {
+          Description = "Haku Space hyprlock background (mirror current wallpaper)";
+          PartOf = [ "graphical-session.target" ];
+        };
+        Service = {
+          Type = "oneshot";
+          ExecStart = "${hyprlockBgGen}";
+        };
       };
       hakuspace-notifications = themed (
         service "Haku Space notification centre" "${pkgs.swaynotificationcenter}/bin/swaync"
       );
       hakuspace-idle = service "Haku Space idle daemon" "${pkgs.hypridle}/bin/hypridle";
+      # Gamma + kbd-backlight RESET on every session start -- the safety net for the gamma
+      # idle dim (features/hakuspace dim path). The user has no gamma control, so if a crash
+      # or freeze ever left a hyprsunset daemon alive (holding the dim ramp) or the keyboard
+      # backlight dimmed, there would be no way to recover. Resetting at login guarantees a
+      # clean slate: kill any stray hyprsunset (its ramp reverts to full) + kbd backlight up.
+      # Needs no compositor (pkill + sysfs), so it runs regardless of startup ordering.
+      hakuspace-gamma-reset = oneshot "Haku Space gamma reset" (pkgs.writeShellScript "hakuspace-gamma-reset-startup" ''
+        ${pkgs.procps}/bin/pkill -x hyprsunset 2>/dev/null
+        for l in /sys/class/leds/*kbd_backlight; do
+          [ -e "$l" ] && ${pkgs.brightnessctl}/bin/brightnessctl -d "''${l##*/}" set 100% >/dev/null 2>&1
+        done
+        exit 0
+      '');
+      # Keeps ~/.cache/hyprlock/* warm so the lock-screen info labels (lockRead) show
+      # instantly + together on an AOD wake, and spawn no playerctl/wpctl on hyprlock's
+      # own path (less password stutter). The loop self-gates on `pgrep hyprlock`, so it's
+      # idle (a 20s check) whenever the screen isn't locked. Exec'd by installed path.
+      hakuspace-hyprlock-cache = service "Haku Space hyprlock value cache" (bin "hyprlock-cache-loop");
 
       # Two watchers, not one: cliphist stores text and images through separate
       # wl-paste subscriptions and a single --watch handles one MIME class.
@@ -500,6 +574,23 @@ in
       */
       hakuspace-bar = themed (oneshot "Haku Space bar" (bin "waybar_manager.sh"));
       hakuspace-dockbar = themed (oneshot "Haku Space dockbar" "${bin "dockbar_manager.sh"} --startup");
+    };
+
+    # Watch the awww wallpaper cache and refresh the hyprlock background on change, so
+    # the lock screen's wallpaper stays current without any per-lock work. awww rewrites
+    # this per-output cache file whenever the wallpaper changes; PathChanged (fires on
+    # close-after-write) starts hakuspace-hyprlock-bg.service. The version segment comes
+    # from pkgs.awww.version so it tracks a flake bump; the output is this host's panel.
+    systemd.user.paths.hakuspace-hyprlock-bg = {
+      Unit = {
+        Description = "Watch the wallpaper cache and refresh the hyprlock background";
+        PartOf = [ "graphical-session.target" ];
+      };
+      Install.WantedBy = [ "graphical-session.target" ];
+      Path = {
+        PathChanged = "${config.home.homeDirectory}/.cache/awww/${pkgs.awww.version}/eDP-1";
+        Unit = "hakuspace-hyprlock-bg.service";
+      };
     };
 
     /*
@@ -665,6 +756,26 @@ in
             ${audioSinkMenu} ${pkgs.pavucontrol}/bin/pavucontrol
         '';
 
+        # Workspace button TEXT colours for the per-monitor/chess-notation scheme (features/hyprland,
+        # features/sidedock): black on the active (light) button, white on the inactive (dimmed)
+        # ones. Appended to style.css so it wins the cascade -- no upstream anchor to drift, unlike
+        # substituteInPlace. (ext/workspaces renders as #workspaces button in every layout.)
+        addWsColors = ''
+          printf '\n/* per-monitor workspaces: active=black text, inactive=white text */\n#workspaces button { color: #ffffff; }\n#workspaces button.active { color: #000000; }\n' >> $out/style.css
+        '';
+
+        # Drop waybar's inline "cava" module from the bar: it SEGV's in getIcon on a style reload
+        # (use-after-free -- a stray cava callback fires after the module is torn down; the theme
+        # rewrites style.css on accent changes, so reload_style_on_change kept re-triggering it). The
+        # full visualizer is the pygobject underbar (custom/cavaunderbar), which stays. Only island/
+        # full/top list it; the grep guard keeps --replace-fail meaningful (fails loudly if the token
+        # ever moves) while no-opping on layouts without it.
+        dropCava = ''
+          if grep -qE '^[[:space:]]*"cava",' $out/config; then
+            substituteInPlace $out/config --replace-fail '"cava",' ""
+          fi
+        '';
+
         # Layouts that only need the EasyEffects module (island/coredge/full/left
         # already show the date inline and have no custom/settings drawer).
         patchEE =
@@ -673,6 +784,8 @@ in
             cp -r ${share}/waybar/${mode} $out
             chmod -R u+w $out
             ${addModules}
+            ${addWsColors}
+            ${dropCava}
           '';
 
         patchMode =
@@ -686,6 +799,8 @@ in
               --replace-fail '"format": " {:%H:%M} "' '"format": " {:%H:%M · %a %d %b} "'
 
             ${addModules}
+            ${addWsColors}
+            ${dropCava}
           '';
       in
       {
@@ -788,20 +903,36 @@ in
           run mkdir -p "$HOME/.config/rofi"
           run install -m644 ${share}/rofi/config.rasi "$HOME/.config/rofi/config.rasi"
         fi
-        # Fullscreen frosted backdrop for BOTH the launcher and hakumenu (both read
-        # this config.rasi). The shipped layout themes make `window` a small opaque
-        # box, so Hyprland's blur has nothing to show through -- only a dim was ever
-        # visible. Override window to fullscreen + transparent (the visible box moves
-        # to the centered `mainbox`), so the rofi LAYER spans the screen and the
-        # blur rule in compositor.nix frosts the whole desktop behind it. Appended
-        # AFTER the theme's `@theme` line so it wins; marker-guarded so it's written
-        # once and the theme switcher (which only seds the `@theme` line) leaves it
-        # intact. Tune the padding (box size) / border-radius here if needed.
-        if [ -e "$HOME/.config/rofi/config.rasi" ] && ! grep -q 'haku-fullscreen-blur' "$HOME/.config/rofi/config.rasi" 2>/dev/null; then
+        # Fullscreen frosted + DIMMED backdrop for BOTH the launcher and hakumenu
+        # (both read this config.rasi). The shipped layout themes make `window` a small
+        # opaque box, so Hyprland's blur has nothing to show through. Override window to
+        # fullscreen (the visible box moves to the centered `mainbox`), so the rofi
+        # LAYER spans the screen and the blur rule in compositor.nix frosts the whole
+        # desktop behind it. The window fill is a translucent BLACK (not transparent):
+        # over a light wallpaper a purely-transparent+blurred backdrop stayed near-white
+        # and the menu read as white-on-white -- the dim guarantees contrast regardless
+        # of what's behind. Appended AFTER the theme's `@theme` line so it wins.
+        #
+        # Re-applied on EVERY activation (strip any previous block, then re-append) so
+        # edits here -- the dim, the padding/box size, the radius -- actually propagate
+        # to an already-written config.rasi. The theme switcher only seds the `@theme`
+        # line, well above this trailing block, so rewriting the block never fights it.
+        if [ -e "$HOME/.config/rofi/config.rasi" ]; then
+          # Self-heal an unclean-shutdown NUL corruption. config.rasi is MUTABLE (the theme
+          # switcher seds it in place), so nothing restores it; a hard power-off (the
+          # dell-latitude freeze) can leave a NUL-filled block mid-write, and NUL bytes are
+          # not valid rasi -> rofi "syntax error ... expecting end of file" and a dead
+          # launcher. Strip NULs (the @theme choice + settings survive; stray blank lines are
+          # harmless to rasi) before the block rewrite below, which only touches marker..EOF.
+          if ! tr -d '\0' < "$HOME/.config/rofi/config.rasi" | cmp -s - "$HOME/.config/rofi/config.rasi"; then
+            tr -d '\0' < "$HOME/.config/rofi/config.rasi" > "$HOME/.config/rofi/config.rasi.heal" \
+              && run mv -f "$HOME/.config/rofi/config.rasi.heal" "$HOME/.config/rofi/config.rasi"
+          fi
+          run sed -i '/haku-fullscreen-blur/,$d' "$HOME/.config/rofi/config.rasi"
           cat >> "$HOME/.config/rofi/config.rasi" <<'ROFIBLUR'
 
 /* haku-fullscreen-blur (nix-managed, see features/hakuspace/home.nix) */
-window { fullscreen: true; background-color: transparent; padding: 25% 32%; border-radius: 0px; }
+window { fullscreen: true; background-color: rgba(0,0,0,0.45); padding: 25% 32%; border-radius: 0px; }
 mainbox { background-color: @background; border-radius: 4px; padding: 20px; }
 ROFIBLUR
         fi
@@ -964,6 +1095,39 @@ ROFIBLUR
         # empty, which hyprlock renders as "Sample Text". These only DISPLAY;
         # control is the locked media keybinds in features/hyprland (hyprlock has
         # no clickable widgets).
+        # AOD guard: when the AOD flag file exists (raised by the idle AOD stage, cleared
+        # on any input -- see aodEnter/aodExit below), a lock label collapses to a single
+        # BRAILLE BLANK (U+2800) instead of its content, so the right-hand info column +
+        # transport row vanish and only the clock + password remain -- the "fake AOD"
+        # minimal look. U+2800 (not an empty string) is deliberate: an empty label renders
+        # hyprlock's "Sample Text" placeholder (general { text_trim = true }); the braille
+        # blank is non-empty, non-whitespace, and draws nothing.
+        aodGuard = ''
+          flag="''${XDG_RUNTIME_DIR:-/tmp}/haku-aod"
+          [ -e "$flag" ] && { printf '⠀'; exit 0; }
+        '';
+        # The info labels read a CACHE (hakuspace-hyprlock-cache keeps ~/.cache/hyprlock/*
+        # warm while hyprlock runs, see the service below) instead of each SPAWNING
+        # playerctl/wpctl on every poll. Two wins: (1) on AOD WAKE the labels cat an
+        # already-warm cache, so music/battery/weather reappear INSTANTLY and TOGETHER
+        # rather than popping in one-by-one as each slow command finishes ("random manner");
+        # (2) far fewer process spawns on hyprlock's own path, so the password field doesn't
+        # stutter. lockRead = the per-label reader: obey the AOD guard, else print the cached
+        # field (U+2800 if the cache is missing/empty -- never empty, or we hit Sample Text).
+        lockRead = pkgs.writeShellScript "lock-read" ''
+          ${aodGuard}
+          export PATH=${lib.makeBinPath [ pkgs.coreutils ]}:$PATH
+          v=$(cat "$HOME/.cache/hyprlock/$1" 2>/dev/null)
+          [ -n "$v" ] && printf '%s' "$v" || printf '⠀'
+        '';
+        # RAW value producers (NO aodGuard): the cache updater runs these and writes their
+        # output to ~/.cache/hyprlock/<field>. They must NOT self-hide -- the cache has to
+        # hold the REAL value even during AOD so a wake shows it immediately; hiding is the
+        # reader's (lockRead's) job.
+        lockBattery = pkgs.writeShellScript "lock-battery" ''
+          export PATH=${lib.makeBinPath [ pkgs.coreutils ]}:$PATH
+          printf '%s%% · %s' "$(cat /sys/class/power_supply/BAT0/capacity)" "$(cat /sys/class/power_supply/BAT0/status)"
+        '';
         lockMusicSong = pkgs.writeShellScript "lock-music-song" ''
           export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.coreutils pkgs.gnugrep ]}:$PATH
           if playerctl metadata title 2>/dev/null | grep -q .; then
@@ -972,19 +1136,13 @@ ROFIBLUR
             printf 'No music playing'
           fi
         '';
-        # ONLY the play/pause glyph (single char). prev/next are static labels
-        # drawn independently, so this glyph changing width (▶ vs ⏸) never shifts
-        # them -- it's halign=center, so ▶<->⏸ just re-centres in place.
-        lockMusicPlayPause = pkgs.writeShellScript "lock-music-playpause" ''
-          export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gnugrep ]}:$PATH
-          if playerctl status 2>/dev/null | grep -q Playing; then
-            printf '⏸'
-          else
-            printf '▶'
-          fi
-        '';
         lockMusicPosition = pkgs.writeShellScript "lock-music-position" ''
           export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gawk pkgs.coreutils ]}:$PATH
+          # Only show the progress slider while something is ACTIVELY PLAYING. Checking for a
+          # title alone wasn't enough -- a Paused/Stopped player (or no player) still carries
+          # metadata, so the dead "0:00" lingered. status != Playing -> hide (U+2800). Volume
+          # is a separate label and stays shown. (Cached; lockRead passes the U+2800 through.)
+          [ "$(playerctl status 2>/dev/null)" = Playing ] || { printf '⠀'; exit 0; }
           p=$(playerctl position 2>/dev/null)
           l=$(playerctl metadata mpris:length 2>/dev/null)
           exec awk -v p="$p" -v l="$l" 'BEGIN{
@@ -1038,6 +1196,38 @@ ROFIBLUR
           if [ -s "$cache" ]; then cat "$cache"; else printf '  …'; fi
         '';
 
+        # Cache updater: write each RAW producer's output to ~/.cache/hyprlock/<field>,
+        # ATOMICALLY (tmp + mv) so a reader (lockRead) never cats a half-written file.
+        hyprlockCacheUpdate = pkgs.writeShellScript "hakuspace-hyprlock-cache-update" ''
+          export PATH=${lib.makeBinPath [ pkgs.coreutils ]}:$PATH
+          d="$HOME/.cache/hyprlock"
+          mkdir -p "$d"
+          w() { local f="$1"; shift; "$@" > "$d/.$f" 2>/dev/null && mv -f "$d/.$f" "$d/$f" 2>/dev/null; }
+          w song     ${lockMusicSong}
+          w position ${lockMusicPosition}
+          w volume   ${lockMusicVolume}
+          w battery  ${lockBattery}
+          w weather  ${lockWeather}
+        '';
+        # The loop that keeps the cache warm -- installed to ~/.local/bin (below) and run by
+        # the hakuspace-hyprlock-cache service (systemd.user.services). While hyprlock is up,
+        # refresh every ~0.75s (the lit backlight already dwarfs this cost during AOD, so
+        # keeping the cache fresh for an INSTANT wake is effectively free); while unlocked,
+        # idle-check every 20s so playerctl/wpctl aren't spawned on the live desktop for
+        # nothing. Installed-and-exec'd by path rather than referenced from the service
+        # directly, because the service lives in the outer `let` and these in home.file's.
+        hyprlockCacheLoop = pkgs.writeShellScript "hakuspace-hyprlock-cache-loop" ''
+          export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.procps ]}:$PATH
+          while true; do
+            if pgrep -x hyprlock >/dev/null 2>&1; then
+              ${hyprlockCacheUpdate}
+              sleep 0.75
+            else
+              sleep 20
+            fi
+          done
+        '';
+
         # Right-hand column: battery on top, then the music cluster (song, the
         # transport row, position bar, volume bar). All halign=right, inset 120px
         # to mirror the left pill's margin; y+ is up. The battery/song keep the
@@ -1046,7 +1236,7 @@ ROFIBLUR
 
           label {
               monitor =
-              text = cmd[update:10000] ${lockWeather}
+              text = cmd[update:500] ${lockRead} weather
               color = rgba(255, 255, 255, 0.65)
               font_size = 15
               font_family = $font_family extraBold
@@ -1058,7 +1248,7 @@ ROFIBLUR
 
           label {
               monitor =
-              text = cmd[update:1000] echo "$(cat /sys/class/power_supply/BAT0/capacity)% · $(cat /sys/class/power_supply/BAT0/status)"
+              text = cmd[update:500] ${lockRead} battery
               color = rgba(255, 255, 255, 0.7)
               font_size = 16
               font_family = $font_family extraBold
@@ -1070,7 +1260,7 @@ ROFIBLUR
 
           label {
               monitor =
-              text = cmd[update:1000] ${lockMusicSong}
+              text = cmd[update:250] ${lockRead} song
               color = $accent_color
               font_size = 16
               font_family = $font_family extraBold
@@ -1082,40 +1272,7 @@ ROFIBLUR
 
           label {
               monitor =
-              text = ⏮
-              color = rgba(255, 255, 255, 0.9)
-              font_size = 20
-              position = 700, 8
-              halign = center
-              valign = center
-              zindex = 5
-          }
-
-          label {
-              monitor =
-              text = cmd[update:250] ${lockMusicPlayPause}
-              color = rgba(255, 255, 255, 0.9)
-              font_size = 20
-              position = 760, 8
-              halign = center
-              valign = center
-              zindex = 5
-          }
-
-          label {
-              monitor =
-              text = ⏭
-              color = rgba(255, 255, 255, 0.9)
-              font_size = 20
-              position = 820, 8
-              halign = center
-              valign = center
-              zindex = 5
-          }
-
-          label {
-              monitor =
-              text = cmd[update:500] ${lockMusicPosition}
+              text = cmd[update:250] ${lockRead} position
               color = rgba(255, 255, 255, 0.55)
               font_size = 13
               font_family = $font_family
@@ -1127,7 +1284,7 @@ ROFIBLUR
 
           label {
               monitor =
-              text = cmd[update:250] ${lockMusicVolume}
+              text = cmd[update:500] ${lockRead} volume
               color = rgba(255, 255, 255, 0.55)
               font_size = 14
               font_family = $font_family
@@ -1148,18 +1305,22 @@ ROFIBLUR
         hyprlockNoText =
           name: extra:
           let
-            # Two rewrites of the upstream file (replaceStrings is a no-op on a
-            # file lacking the string, e.g. hyprlock_tiny.conf):
+            # Rewrites of the upstream file (replaceStrings is a no-op on a file
+            # lacking the string, e.g. hyprlock_tiny.conf):
             #   1. Swap the cutesy password placeholder "<i> Use Me ;) </i>".
-            #   2. Match the lock-screen background blur to the compositor frost
-            #      (features/hyprland decoration.blur): stronger blur (passes 2->3,
-            #      explicit size 8), a noise grain, and -- the point -- UN-DARKEN it
-            #      (brightness 0.5 -> 1.1) so it reads as a real frost, not a dim,
-            #      the same way the rofi backdrop does. If the white widgets wash
-            #      out on a bright wallpaper, `brightness` is the knob.
+            #   2. BACKGROUND = the WALLPAPER, dimmed + blurred -- NOT `path = screenshot`.
+            #      Upstream screenshots the live desktop, so the lock leaks whatever
+            #      windows were open; point it instead at ${hyprlockBg}, a fixed PNG that
+            #      mirrors the current awww wallpaper (regenerated on change, see
+            #      hyprlockBgGen + its .path watcher). hyprlock then does its own blur
+            #      (passes 2->3, size 8) + noise grain, and brightness 0.5 -> 0.45 DIMS it
+            #      so the white widgets read clearly over it. `brightness` is the dim knob
+            #      (lower = darker); on a blank first boot the PNG may not exist yet and
+            #      hyprlock falls back to a plain dark bg (still no screenshot leak).
             base = builtins.replaceStrings
               [
                 "<i> Use Me ;) </i>"
+                "path = screenshot"
                 "blur_passes = 2"
                 "contrast = 1.2"
                 "brightness = 0.5"
@@ -1167,9 +1328,10 @@ ROFIBLUR
               ]
               [
                 "<i>Enter password</i>"
+                "path = ${hyprlockBg}"
                 "blur_passes = 3\n    blur_size = 8"
                 "contrast = 1.0"
-                "brightness = 1.1"
+                "brightness = 0.45"
                 "vibrancy_darkness = 0\n    noise = 0.02"
               ]
               (stripLockLabels (builtins.readFile "${hyprlockSrcDir}/${name}"));
@@ -1180,63 +1342,97 @@ ROFIBLUR
           pkgs.writeText "${name}-notext"
             ((if extra == "" then base else toLeft base) + extra);
 
-        # Idle dim: FADE the backlight down to 10% over ~1s, cancellable. Two
-        # fixes over the old one-liner (`brightnessctl -s set 10`): that `10`
-        # was a RAW value (~0% of a 120000 max), not 10% -- hence "dims to 0";
-        # and it was instant. Now:
-        #   - only act when currently >15% (never re-dim, never save 10% as the
-        #     restore point). brightnessctl -m = name,type,current,percent,max.
-        #   - `-s` first, so on-resume's `-r` restores the pre-dim level (shared
-        #     with the dpms/suspend restore path, kept consistent).
-        #   - fade in 20 steps of 50ms to 10% of max; write the pid so the
-        #     resume script can kill the fade mid-way if input arrives inside 1s.
-        dimFade = pkgs.writeShellScript "hakuspace-idle-dim" ''
-          export PATH=${lib.makeBinPath [ pkgs.brightnessctl pkgs.coreutils ]}:$PATH
-
-          # Keyboard backlight mirrors the screen's two states: DIM (level 1) while
-          # the screen is dimmed, FULL (max) when active (restored below). Matches
-          # any *kbd_backlight LED; no-op on hosts/keyboards without one.
-          kbd=""
-          for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
+        # Idle dim via GAMMA, NOT the backlight. The old approach faded brightnessctl down
+        # and saved/-restored the pre-dim level -- but a lid-close MID-FADE snapshotted the
+        # in-between value (before_sleep re-ran `brightnessctl -s`) and left the hardware
+        # brightness stuck somewhere between. Gamma-dimming the OUTPUT (hyprsunset -g) never
+        # touches the backlight, so the user's brightness is ALWAYS exactly what they set --
+        # nothing to snapshot, nothing to race, nothing to get stuck, and "brightness back to
+        # what the user set" (at lock / on wake) is just resetting the gamma. A short-lived
+        # hyprsunset DAEMON holds the ramp (wlroots reverts gamma when the gamma client exits,
+        # verified), so gammaReset simply kills it to undim. Neutral temp 6500K; gammaLevel% =
+        # the dim depth (hyprsunset gamma is a brightness scale, 100 = normal). Tune here.
+        gammaLevel = 40;
+        gammaDim = pkgs.writeShellScript "hakuspace-gamma-dim" ''
+          export PATH=${lib.makeBinPath [ pkgs.hyprsunset pkgs.procps pkgs.brightnessctl pkgs.coreutils pkgs.util-linux ]}:$PATH
+          pkill -x hyprsunset 2>/dev/null
+          setsid -f hyprsunset -t 6500 -g ${toString gammaLevel} >/dev/null 2>&1
+          # Keyboard backlight follows the screen: DIM (level 1). A SEPARATE LED device set to
+          # an ABSOLUTE value, so it has none of the brightness-snapshot race the screen had.
+          kbd=""; for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
           [ -n "$kbd" ] && brightnessctl -d "$kbd" set 1 >/dev/null 2>&1
-
-          pidfile="''${XDG_RUNTIME_DIR:-/tmp}/hakuspace-dim.pid"
-          [ -r "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
-          echo $$ > "$pidfile"
-          info=$(brightnessctl -m)
-          cur=$(echo "$info" | cut -d, -f3)
-          pct=$(echo "$info" | cut -d, -f4 | tr -d %)
-          max=$(echo "$info" | cut -d, -f5)
-          if [ "''${pct:-0}" -le 15 ]; then rm -f "$pidfile"; exit 0; fi
-          brightnessctl -s >/dev/null
-          target=$(( max / 10 ))
-          steps=20
-          i=1
-          while [ "$i" -le "$steps" ]; do
-            brightnessctl -q set "$(( cur - (cur - target) * i / steps ))"
-            sleep 0.05
-            i=$(( i + 1 ))
-          done
-          brightnessctl -q set "$target"
-          rm -f "$pidfile"
+          exit 0
+        '';
+        gammaReset = pkgs.writeShellScript "hakuspace-gamma-reset" ''
+          export PATH=${lib.makeBinPath [ pkgs.procps pkgs.brightnessctl pkgs.coreutils ]}:$PATH
+          pkill -x hyprsunset 2>/dev/null   # gamma client exits -> compositor reverts to full
+          kbd=""; for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
+          [ -n "$kbd" ] && brightnessctl -d "$kbd" set 100% >/dev/null 2>&1
+          exit 0
         '';
 
-        # Idle over: kill an in-progress fade, then jump straight back to the
-        # pre-dim level (brightnessctl -r). If the fade already finished, there
-        # is no pid to kill and -r just restores.
-        dimRestore = pkgs.writeShellScript "hakuspace-idle-undim" ''
-          export PATH=${lib.makeBinPath [ pkgs.brightnessctl pkgs.coreutils ]}:$PATH
-          pidfile="''${XDG_RUNTIME_DIR:-/tmp}/hakuspace-dim.pid"
-          [ -r "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null && rm -f "$pidfile"
-          brightnessctl -q -r
-
-          # Keyboard backlight back to FULL (max) now the screen is active again.
-          kbd=""
-          for l in /sys/class/leds/*kbd_backlight; do [ -e "$l" ] && kbd=''${l##*/} && break; done
-          [ -n "$kbd" ] && brightnessctl -d "$kbd" set 100% >/dev/null 2>&1
+        # Idle condition for the DIM + LOCK listeners: block them while a media player is
+        # PLAYING, so a video isn't dimmed/locked mid-watch. The stock idle_inhibit.sh (exec'd
+        # below) is MEANT to block on an active audio stream, but its pactl sink-input check
+        # does not trigger on this pipewire setup (verified: a playing YouTube still dims) --
+        # and it misses muted video anyway. playerctl is reliable, so check it FIRST: any
+        # player Playing -> exit 1 (hypridle blocks the on-timeout + retries). Else defer to
+        # idle_inhibit.sh for the nosleep toggle. Video vs audio isn't cleanly separable, so
+        # music also holds the screen -- the user accepts that and locks manually when needed.
+        mediaIdleCond = pkgs.writeShellScript "hakuspace-media-idle-cond" ''
+          export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gnugrep pkgs.coreutils ]}:$PATH
+          playerctl -a status 2>/dev/null | grep -q '^Playing$' && exit 1
+          exec "$HOME/.local/bin/idle_inhibit.sh"
         '';
 
         /*
+          Idle AOD stage -- the old "turn off display (DPMS)" listener, retargeted.
+          A FAKE always-on-display (the panel is a backlit LCD, so this is a dim
+          glanceable screen, not a real zero-power AOD): keep the panel ON and
+          collapse the lock screen to just the clock + password -- every dynamic
+          label self-hides on the AOD flag (see aodGuard).
+
+          The listener is gated on `pidof hyprlock` with a SHORT (30s) timeout, so it
+          is really "30s of idle AFTER the screen is LOCKED" -- which makes it a
+          MANUAL-LOCK TIMER too: hit SUPER+Escape (features/hakuspace/compositor.nix)
+          and 30s later it dims + minimises, instead of sitting bright until the full
+          idle sequence would have reached it. For the AUTO path the 150s lock trips
+          the same gate, so AOD follows the auto-lock within condition_retry (10s).
+          When NOT locked the gate fails and nothing happens -- AOD only exists behind
+          the lock.
+
+          INFINITE AOD while the lid is open: AOD is the SAME on AC and battery --
+          ALWAYS raise the flag + dim, never power the panel off, and never idle-suspend
+          ((3) below deletes the suspend listener). It just holds the dim clock for as
+          long as the lid stays open. Real sleep still happens on LID CLOSE (logind
+          HandleLidSwitch) and at critical battery (UPower) -- both independent of
+          hypridle -- so a dying cell is still parked cleanly. The dim is GAMMA (gammaDim),
+          so AOD never touches the backlight; aodExit resets it (gammaReset). gammaDim is
+          idempotent (kills+relaunches the single hyprsunset daemon), so "unlocked dim already
+          ran" and "manual lock dims fresh" both land in the same dimmed state.
+        */
+        aodEnter = pkgs.writeShellScript "hakuspace-aod-enter" ''
+          flag="''${XDG_RUNTIME_DIR:-/tmp}/haku-aod"
+          : > "$flag"
+          ${gammaDim}
+        '';
+        aodExit = pkgs.writeShellScript "hakuspace-aod-exit" ''
+          export PATH=${lib.makeBinPath [ pkgs.coreutils ]}:$PATH
+          flag="''${XDG_RUNTIME_DIR:-/tmp}/haku-aod"
+          rm -f "$flag"
+          "$HOME/.local/bin/dpms_handler.sh" on
+          # Undim: gammaReset kills the hyprsunset daemon so the compositor reverts the gamma
+          # ramp to full. The hardware backlight was never touched, so this restores EXACTLY
+          # what the user set. The short sleep lets the panel come back on the battery DPMS path.
+          sleep 0.3
+          ${gammaReset}
+        '';
+
+        /*
+          NOTE: currently UNUSED -- the idle-suspend listener was removed for infinite
+          AOD (see (3) in hypridleFixed). Kept defined so re-enabling idle-suspend is a
+          one-line change. The description below documents what it did / would do again.
+
           The idle-suspend gate, replacing upstream's idle_inhibit.sh on the
           suspend listener only. hypridle runs on-timeout when condition_cmd
           exits 0 and blocks (+retries) when it is non-zero. So: exit 0 to
@@ -1268,15 +1464,21 @@ ROFIBLUR
           cp ${pkgHypr}/hypridle.conf $out
           chmod u+w $out
 
-          # (1) fade to 10% over ~1s (cancellable), and never dim -- nor save a
-          # restore point -- when already dim; on-resume kills any in-progress
-          # fade and jumps back to the pre-dim level.
+          # (1) idle dim = GAMMA (gammaDim), NOT the backlight -- so the hardware brightness is
+          # never touched and can't get snapshotted mid-fade/stuck (see gammaDim). on-resume
+          # resets the gamma if the user comes back before the lock.
           substituteInPlace $out \
             --replace-fail 'on-timeout = brightnessctl -s set 10' \
-              'on-timeout = ${dimFade}'
+              'on-timeout = ${gammaDim}'
           substituteInPlace $out \
             --replace-fail 'on-resume = brightnessctl -r' \
-              'on-resume = ${dimRestore}'
+              'on-resume = ${gammaReset}'
+          # (1b) RESET the gamma AT LOCK so the lock screen shows at the user's real brightness
+          # ("back to what the user set"); the locked pipeline (AOD, 30s) re-dims after. The
+          # lock listener's on-timeout is unique (suspend uses `systemctl suspend`).
+          substituteInPlace $out \
+            --replace-fail 'on-timeout = loginctl lock-session' \
+              'on-timeout = ${gammaReset}; loginctl lock-session'
 
           # (2) save around the suspend the lid triggers, restore on wake.
           substituteInPlace $out \
@@ -1286,24 +1488,57 @@ ROFIBLUR
             --replace-fail 'after_sleep_cmd = ~/.local/bin/dpms_handler.sh on' \
               'after_sleep_cmd = ~/.local/bin/dpms_handler.sh on && brightnessctl -r'
 
-          # (3) idle-suspend: AC-aware + a reliable nosleep gate, 5 min -> 15 min.
-          #     timeout=300 is unique to the suspend listener; the condition_cmd
-          #     line is shared, so it is rewritten only inside the suspend block
-          #     (the sed range anchored on `systemctl suspend`), leaving the
-          #     dim/lock/dpms listeners' own conditions untouched.
+          # (2b) AOD instead of DPMS-off, PLUS a manual-lock timer. Retarget the whole
+          #      180s "Turn off display (DPMS)" listener in one anchored sed range:
+          #        - timeout 180 -> 30 and condition idle_inhibit.sh -> `pidof hyprlock`,
+          #          so it fires 30s of idle AFTER the screen is LOCKED -- by the 150s
+          #          auto lock OR a manual SUPER+Escape. Off the lock the gate fails and
+          #          nothing happens. (idle_inhibit is implied: no lock -> no hyprlock.)
+          #        - condition_retry 60 -> 10 so AOD follows the auto lock within ~10s.
+          #        - on-timeout/on-resume -> aodEnter/aodExit.
+          #      A range (not substituteInPlace) because condition_cmd/condition_retry are
+          #      shared line values across listeners; the `# Turn off display (DPMS)` ..
+          #      `}` anchors confine the edits to this one listener. `&` in the on-resume
+          #      pattern is literal in a sed LHS; `|` delimiter keeps the store paths clean.
           ${pkgs.gnused}/bin/sed -i \
-            -e 's|timeout = 300|timeout = 900|' \
-            -e '/on-timeout = systemctl suspend/,/condition_retry/ {
-                  s|condition_cmd = .*|condition_cmd = ${suspendGate}|
-                  s|condition_retry = .*|condition_retry = 30|
+            -e '/# Turn off display (DPMS)/,/^}/ {
+                  s|timeout = 180|timeout = 30|
+                  s|on-timeout = ~/.local/bin/dpms_handler.sh off|on-timeout = ${aodEnter}|
+                  s|on-resume = ~/.local/bin/dpms_handler.sh on && sleep 0.5 && brightnessctl -r|on-resume = ${aodExit}|
+                  s|condition_cmd = ~/.local/bin/idle_inhibit.sh|condition_cmd = pidof hyprlock|
+                  s|condition_retry = 60|condition_retry = 10|
                 }' \
             $out
+
+          # (3) NO idle-suspend -- "infinite AOD while the lid is open". Delete the whole
+          #     "Put machine to Sleep" listener (comment line .. its closing brace) so the
+          #     machine never auto-sleeps from idle on AC OR battery; it just holds the dim
+          #     AOD clock for as long as the lid is open. Real sleep still happens on LID
+          #     CLOSE (logind HandleLidSwitch) and at critical battery (UPower) -- neither
+          #     goes through hypridle -- so a dying cell is still parked cleanly. suspendGate
+          #     is consequently unused; kept defined for an easy re-enable.
+          ${pkgs.gnused}/bin/sed -i \
+            -e '/# Put machine to Sleep/,/^}/d' \
+            $out
+
+          # (4) Block the DIM + LOCK while media is PLAYING (see mediaIdleCond -- playerctl,
+          #     catches muted video the stock audio check misses). Runs LAST on purpose: by
+          #     now the AOD listener's condition is already `pidof hyprlock` (2b) and the
+          #     suspend block is deleted (3), so only the dim + lock conditions still read
+          #     idle_inhibit.sh -- --replace-fail rewrites both remaining occurrences.
+          substituteInPlace $out \
+            --replace-fail 'condition_cmd = ~/.local/bin/idle_inhibit.sh' \
+              'condition_cmd = ${mediaIdleCond}'
         '';
       in
       {
         ".config/hypr/hypridle.conf".source = hypridleFixed;
         ".config/hypr/hyprlock.conf".source = hyprlockNoText "hyprlock.conf" hyprlockExtras;
         ".config/hypr/hyprlock_tiny.conf".source = hyprlockNoText "hyprlock_tiny.conf" "";
+        # The lock-screen value cache loop (see hyprlockCacheLoop). Installed to a stable
+        # path so the hakuspace-hyprlock-cache service can exec it by `bin "..."` from the
+        # outer `let` (it can't see this inner `let`'s store paths).
+        ".local/bin/hyprlock-cache-loop".source = hyprlockCacheLoop;
       };
   };
 }

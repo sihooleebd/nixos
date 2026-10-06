@@ -121,8 +121,8 @@ let
     installPhase = ''
       install -Dm755 camera-relay $out/share/camera-relay/camera-relay
       substituteInPlace $out/share/camera-relay/camera-relay \
-        --replace "/usr/local/bin/camera-relay-monitor" "${cameraRelayMonitor}/bin/camera-relay-monitor" \
-        --replace "/usr/local/bin/camera-relay" "$out/bin/camera-relay"
+        --replace-fail "/usr/local/bin/camera-relay-monitor" "${cameraRelayMonitor}/bin/camera-relay-monitor" \
+        --replace-fail "/usr/local/bin/camera-relay" "$out/bin/camera-relay"
       mkdir -p $out/bin
       makeWrapper $out/share/camera-relay/camera-relay $out/bin/camera-relay \
         --prefix PATH : ${lib.makeBinPath cameraRelayRuntimeInputs} \

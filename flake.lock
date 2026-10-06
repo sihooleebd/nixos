@@ -153,15 +153,15 @@
     "doom-private": {
       "flake": false,
       "locked": {
-        "lastModified": 1787939158,
-        "narHash": "sha256-dzN/aY8o8o0MXR3aqSP6p/lsBnSCY6hyopAE7UhVtKg=",
-        "owner": "R0K0R",
+        "lastModified": 1790679561,
+        "narHash": "sha256-3jFIUrxzNKUMKpEfeW4KNTjKhsZdVaus53JKqpoQZiE=",
+        "owner": "sihooleebd",
         "repo": "doom-emacs",
-        "rev": "39cbe315258c054248285d8d103f33327f126040",
+        "rev": "66fb71d4913eed64709e6a4adaa8a1d8d4d20f51",
         "type": "github"
       },
       "original": {
-        "owner": "R0K0R",
+        "owner": "sihooleebd",
         "repo": "doom-emacs",
         "type": "github"
       }
@@ -640,11 +640,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1785692966,
-        "narHash": "sha256-vUfIeBEfpbAfZ5zjgIkYk7eHBeVfCYVjLbWnMkseYnk=",
+        "lastModified": 1790822859,
+        "narHash": "sha256-69xHQhAeMAD2wDXO7T2pcOZIF9Sga2W+JkmY2a11Ops=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "643809054d65fdd466a63e3155b8c498cb483c04",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
         "type": "github"
       },
       "original": {
@@ -697,11 +697,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788419040,
-        "narHash": "sha256-Itdv4WV5z+U0VpseZ/f4uvYmULVPxsV3Hc2l9HrCyY4=",
+        "lastModified": 1789196581,
+        "narHash": "sha256-yJr1Bt4fKkKIpPYbsKGqJ0VFdoDnURgRwuffmBQ2WzY=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "1af4dd0db58d4adde06f0840ce28da90f9c66c50",
+        "rev": "228ecefb6329d5a531b77b46b581a2f0c26ee056",
         "type": "github"
       },
       "original": {
@@ -733,16 +733,17 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1788480808,
-        "narHash": "sha256-dvZR/usQJSQeuxtWYSqD0wu37/SE9DLGSsbjRROwnz0=",
-        "owner": "nolight132",
-        "repo": "sonora",
-        "rev": "a79ce339038c9a802e7e41e0563602699305ecb8",
+        "lastModified": 1791199202,
+        "narHash": "sha256-KyfzhnPcOlApOAEkPNEbOv30UE8O3PJL2Z0qudcm3kQ=",
+        "owner": "sihooleebd",
+        "repo": "sononora",
+        "rev": "45c6a3cef010357d65396a08c775f9c5de32d613",
         "type": "github"
       },
       "original": {
-        "owner": "nolight132",
-        "repo": "sonora",
+        "owner": "sihooleebd",
+        "ref": "feat/niche-fixes-and-features",
+        "repo": "sononora",
         "type": "github"
       }
     },

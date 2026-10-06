@@ -18,7 +18,7 @@
 
     # Former ~/.doom.d (https://github.com/R0K0R/doom-emacs).
     doom-private = {
-      url = "github:R0K0R/doom-emacs";
+      url = "github:sihooleebd/doom-emacs";
       flake = false;
     };
 

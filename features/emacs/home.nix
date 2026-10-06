@@ -123,10 +123,27 @@ lib.mkIf (cfg.enable && inScope) {
     TREESIT_GRAMMAR_DIR = "${treesitGrammars}/lib";
   };
 
-  # Loaded by Doom's config.el when present; empty by default, so a host that
-  # says nothing gets no file at all rather than an empty one.
+  # Loaded by Doom's config.el when present; empty by default, so a host that says nothing gets no
+  # file at all rather than an empty one. my.emacs.font generates the per-machine font-reset hook (the
+  # common case); machineLocalElisp is appended for anything else.
   xdg.configFile."home-manager/doom-machine-local.el" =
-    lib.mkIf (cfg.machineLocalElisp != "") { text = cfg.machineLocalElisp; };
+    let
+      f = cfg.font;
+      fontElisp = lib.optionalString (f != null) ''
+        ;;; -*- lexical-binding: t; -*-
+        ;;; Loaded by Doom `config.el` from ~/.config/home-manager/doom-machine-local.el
+
+        (defun my/machine-local-reset-fonts-h ()
+          (setq doom-font (font-spec :family "${f.family}" :size ${toString f.size}${lib.optionalString (f.weight != null) " :weight '${f.weight}"})
+                doom-variable-pitch-font (font-spec :family "${f.family}" :size ${toString f.size}))
+          (when (fboundp 'doom-init-fonts-h)
+            (doom-init-fonts-h 'reload)))
+
+        (add-hook 'emacs-startup-hook #'my/machine-local-reset-fonts-h)
+      '';
+      combined = fontElisp + cfg.machineLocalElisp;
+    in
+    lib.mkIf (combined != "") { text = combined; };
 
   /*
     programs.doom-emacs wires services.emacs.package to its built emacsWithDoom

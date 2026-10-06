@@ -173,36 +173,155 @@ let
       ''} "$@"
   '';
 
-  /*
-    Page-relative workspace navigation.
+  # NOTE: the old page-relative `wsSlot` shell helper was replaced by the per-monitor workspace
+  # scheme in the keybinds below -- SUPER+<n> switches on the CURRENT screen (instant on one
+  # monitor), and with multiple monitors the wsPick rofi picker (defined below) asks which screen.
 
-    Compositor-level on purpose, not part of any shell: the numbering is how
-    the KEYS behave, and it stays coherent with no bar on screen at all. A
-    shell that draws a workspace strip is expected to mirror this arithmetic
-    (features/dms/plugins/workspaces does) rather than to own it.
-
-    Slot N means "the Nth workspace of the group of ten I am currently in", not
-    workspace N. The page is derived from the LIVE focused workspace on every
-    press rather than tracked in a variable, so the bar plugin and the keybinds
-    cannot disagree -- they run the same arithmetic against the same source and
-    neither writes state the other has to trust.
-
-    Legacy `hyprctl dispatch workspace N` does NOT work here: configType = "lua"
-    routes dispatch through hl.dispatch(), and the bare form dies with
-    "')' expected near '2'". The lua dispatcher form is the only one that
-    parses.
-  */
-  wsSlot = pkgs.writeShellScript "hypr-ws-slot" ''
-    slot="$1"
-    active=$(${pkgs.hyprland}/bin/hyprctl activeworkspace -j | ${pkgs.jq}/bin/jq -r '.id')
-    # Workspaces are 1-based, so bias before dividing: 1..10 -> page 0.
-    page=$(( (active - 1) / 10 ))
-    target=$(( page * 10 + slot ))
-    if [ "$2" = move ]; then
-      ${pkgs.hyprland}/bin/hyprctl dispatch "hl.dsp.window.move({ workspace = $target, follow = true })"
-    else
-      ${pkgs.hyprland}/bin/hyprctl dispatch "hl.dsp.focus({ workspace = $target })"
+  # Single-instance launcher for opendisplay-gui, pointed at by the .desktop override below so the
+  # app-menu entry goes through it. opendisplay-gui is BOTH the control window AND the background
+  # daemon that serves the iPad (it holds a live OpenDisplay-* virtual monitor), so a naive
+  # relaunch from the menu just piles up processes (and orphan virtual monitors). The app has no
+  # single-instance socket / DBus activation / --show flag (verified in the binary), so it CANNOT
+  # be told to re-show its window. User chose "reuse, never disrupt":
+  #   1. a control window is open  -> focus it (no duplicate),
+  #   2. serving headless (window closed, daemon alive) -> DON'T spawn a second; notify instead,
+  #      leaving the live iPad connection untouched,
+  #   3. nothing running -> launch.
+  # Focus schema is hl.dsp.focus({ window = <userdata> }) (verified live; {address=...} does NOT
+  # work). pgrep matches the wrapped Qt binary in the cmdline, which never matches this launcher.
+  opendisplayPkg = pkgs.callPackage ../opendisplay/package.nix { };
+  opendisplayLauncher = pkgs.writeShellScript "opendisplay-single" ''
+    export PATH=${lib.makeBinPath [ pkgs.hyprland pkgs.jq pkgs.libnotify pkgs.procps pkgs.coreutils opendisplayPkg ]}:$PATH
+    cls="org.opendisplay.desktop"
+    # 1) control window already open -> focus it, no duplicate
+    if [ -n "$(hyprctl clients -j | jq -r --arg c "$cls" '.[]|select(.class==$c)|.address' | head -1)" ]; then
+      hyprctl eval "for _,w in ipairs(hl.get_windows()) do if tostring(w.class)=='org.opendisplay.desktop' then hl.dispatch(hl.dsp.focus({ window = w })) break end end" >/dev/null 2>&1
+      exit 0
     fi
+    # 2) serving headless (daemon alive, window closed) -> don't start a second; notify
+    if pgrep -f '\.opendisplay-gui-wrapped' >/dev/null 2>&1; then
+      notify-send -a OpenDisplay -i "$cls" "OpenDisplay already running" \
+        "Serving your iPad in the background. The app can't re-show its window without restarting the stream, so your connection was left running instead of opening a duplicate." >/dev/null 2>&1
+      exit 0
+    fi
+    # 3) nothing running -> launch
+    exec opendisplay-gui "$@"
+  '';
+
+  # rofi "which screen?" picker for SUPER+<n> when MORE THAN ONE monitor is connected (the single-
+  # monitor case is handled inline in Lua -- instant, no menu). Lists screens left-to-right (A, B,
+  # C... matching the workspace decades + the chess bar labels), with the current screen
+  # pre-selected so Enter = stay here; picking another jumps to workspace <slot> on it. With "move"
+  # it sends the active window there instead. $1 = slot (1-10), $2 = "move" (optional). Dispatch via
+  # `hyprctl eval` (the verified-working form on this fork).
+  wsPick = pkgs.writeShellScript "hypr-ws-pick" ''
+    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.rofi pkgs.gawk pkgs.coreutils pkgs.gnugrep ]}:$PATH
+    slot="$1"; mode="$2"
+    mons=$(hyprctl monitors -j 2>/dev/null) || exit 0
+    # index<TAB>name<TAB>desc<TAB>focused, sorted left-to-right (same sort as the pin block)
+    sorted=$(printf '%s' "$mons" | jq -r 'sort_by(.x, .y, .name) | to_entries[] | [(.key|tostring), .value.name, (.value.description // ""), (.value.focused|tostring)] | @tsv')
+    curIdx=$(printf '%s' "$sorted" | awk -F'\t' '$4=="true"{print $1; exit}'); [ -n "$curIdx" ] || curIdx=0
+
+    go() {
+      target=$(( $1 * 10 + slot ))
+      if [ "$mode" = move ]; then
+        hyprctl eval "hl.dispatch(hl.dsp.window.move({ workspace = $target, follow = true }))" >/dev/null 2>&1
+      else
+        hyprctl eval "hl.dispatch(hl.dsp.focus({ workspace = $target }))" >/dev/null 2>&1
+      fi
+    }
+
+    count=$(printf '%s' "$sorted" | grep -c .)
+    [ "$count" -le 1 ] && { go "$curIdx"; exit 0; }
+
+    verb="go to"; [ "$mode" = move ] && verb="move window to"
+    menu=$(printf '%s' "$sorted" | awk -F'\t' '
+      { letter=sprintf("%c", 65+$1); label=($3==""?$2:$3);
+        printf "%s  ·  %s%s\n", letter, label, ($4=="true"?"   ← current":"") }')
+    sel=$(printf '%s' "$menu" | rofi -dmenu -i -p "WS $slot · $verb" -selected-row "$curIdx") || exit 0
+    [ -n "$sel" ] || exit 0
+    letter=$(printf '%s' "$sel" | cut -c1)
+    idx=$(awk -v l="$letter" 'BEGIN{ printf "%d", index("ABCDEFGHIJKLMNOPQRSTUVWXYZ", l) - 1 }')
+    [ "$idx" -ge 0 ] 2>/dev/null && go "$idx"
+  '';
+
+  # Per-monitor workspace management, the SINGLE source shared by the load-time apply AND the
+  # monitor.layout_changed hook (both below) so they cannot drift. Inline Lua -- runs synchronously
+  # in the config/event context, no shell/eval:
+  #   (1) PIN each decade to a monitor by SCREEN ORDER left-to-right (decade 0 -> leftmost = A,
+  #       1 -> B, ...) with chess default_name "<letter><n>" (drives the waybar {name} labels);
+  #   (2) RENAME existing workspaces to chess (default_name only takes at CREATION, so a workspace
+  #       that survived a reload would otherwise keep its bare number);
+  #   (3) EVACUATE windows off an orphaned decade (>= remaining screen count -- unreachable with one
+  #       screen) onto the FOCUSED screen's same slot (silent). No-op when nothing is orphaned.
+  # Nothing hardcoded; scales to any screen count.
+  wsManageLua = ''
+    do
+      local mons = hl.get_monitors()
+      table.sort(mons, function(a, b)
+        local ax, bx = a.x or 0, b.x or 0
+        if ax ~= bx then return ax < bx end
+        local ay, by = a.y or 0, b.y or 0
+        if ay ~= by then return ay < by end
+        return tostring(a.name) < tostring(b.name)
+      end)
+      for idx, m in ipairs(mons) do
+        local base = (idx - 1) * 10
+        local letter = string.char(64 + idx)
+        for n = 1, 10 do
+          hl.workspace_rule({ workspace = tostring(base + n), monitor = tostring(m.name), default_name = letter .. tostring(n) })
+        end
+      end
+      for _, w in ipairs(hl.get_workspaces()) do
+        local id = w.id
+        if id and id >= 1 then
+          hl.dispatch(hl.dsp.workspace.rename({ workspace = tostring(id), name = string.char(65 + math.floor((id - 1) / 10)) .. tostring(((id - 1) % 10) + 1) }))
+        end
+      end
+      local nm = #mons
+      if nm >= 1 then
+        local am = hl.get_active_monitor()
+        local amn = am and tostring(am.name)
+        local fdec = 0
+        for i, m in ipairs(mons) do if tostring(m.name) == amn then fdec = (i - 1) * 10 break end end
+        for _, w in ipairs(hl.get_windows()) do
+          local ws = w.workspace
+          local id = ws and ws.id
+          if id and id >= 1 and math.floor((id - 1) / 10) >= nm then
+            hl.dispatch(hl.dsp.window.move({ window = "address:" .. tostring(w.address), workspace = fdec + (((id - 1) % 10) + 1), follow = false }))
+          end
+        end
+      end
+    end
+  '';
+
+  # Capture each non-config monitor's current runtime scale into ~/.config/hypr/monitor-scales,
+  # which the load-time reader (in the monitor block below) re-applies on every reload -- so a scale
+  # set via wayland survives a reload. Run from the monitor hook. eDP-1 (primary) + DP-1 (Wacom) are
+  # config-managed (my.desktop.primaryOutputScale); HEADLESS-* are throwaway test outputs. Key + 2dp
+  # rounding MUST match the reader. (Lives here with its reader -- monitor-scale capture is a Hyprland
+  # concern, not sidedock's.)
+  scalePersist = pkgs.writeShellScript "hypr-scale-capture" ''
+    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.coreutils pkgs.gawk ]}:$PATH
+    state="$HOME/.config/hypr/monitor-scales"
+    primary="${osConfig.my.desktop.primaryOutput}"
+    mkdir -p "$HOME/.config/hypr"; touch "$state"
+    mons=$(hyprctl monitors all -j 2>/dev/null) || exit 0
+    printf '%s' "$mons" | jq -r '.[] | [.name, ((.scale*100|round)/100|tostring), (.description // "")] | @tsv' \
+    | while IFS="$(printf '\t')" read -r name scale desc; do
+        case "$name" in "$primary"|DP-1|HEADLESS-*|"") continue ;; esac
+        case "$name" in
+          OpenDisplay*) key="opendisplay" ;;
+          *) if [ -n "$desc" ]; then key="d:$desc"; else key="n:$name"; fi ;;
+        esac
+        cur=$(awk -F'\t' -v k="$key" '$1==k{v=$2} END{print v}' "$state")
+        [ "$cur" = "$scale" ] && continue
+        tmp=$(mktemp)
+        awk -F'\t' -v k="$key" '$1!=k' "$state" > "$tmp"
+        printf '%s\t%s\n' "$key" "$scale" >> "$tmp"
+        mv "$tmp" "$state"
+      done
+    exit 0
   '';
 
 in
@@ -244,6 +363,23 @@ in
     # jq in PATH it fails immediately and aborts uncleanly (dbus_disconnect
     # crash) instead of just erroring on the missing monitor lookup.
   ];
+
+  # Override opendisplay's own app-menu entry (org.opendisplay.desktop, from the package) so it
+  # launches through the single-instance launcher instead of spawning a fresh opendisplay-gui
+  # every time. ~/.local/share/applications wins over the system entry by XDG precedence. Fields
+  # mirror the package's .desktop. StartupNotify off: the launcher usually exits without opening a
+  # window (focus/notify paths), and a startup spinner that never resolves is worse than none.
+  xdg.desktopEntries = lib.mkIf (osConfig.my.desktop.compositor == "hyprland") {
+    "org.opendisplay.desktop" = {
+      name = "OpenDisplay";
+      comment = "Use an iOS device as a Wayland display";
+      exec = "${opendisplayLauncher}";
+      icon = "org.opendisplay.desktop";
+      terminal = false;
+      categories = [ "Utility" "System" ];
+      startupNotify = false;
+    };
+  };
 
   wayland.windowManager.hyprland = {
     enable = osConfig.my.desktop.compositor == "hyprland";
@@ -414,8 +550,30 @@ in
           # per-window. inset = left-edge horizontal pull-in, shrink = left-edge
           # vertical shorten (both fractions; 0 = flat). Emitted ONLY when the patch
           # is present, since the stock compositor rejects these unknown keys.
-          keystone_inset = 0.12;
-          keystone_shrink = 0.08;
+          keystone_inset = 0.07;
+          keystone_shrink = 0.035;
+          # rounding = corner radius (px) of the trapezoid AND edge anti-aliasing
+          # (surface.frag keystoneCoverage). Fully-opaque XRGB apps (easyeffects) work
+          # too because trapezoid.patch forces a blur pass on dock windows in
+          # shouldBlur() -- that keeps a backdrop behind the window so the cut corners
+          # show it instead of black. Keep this VISIBLE (>=~20): 16 was too subtle to
+          # see. Live-tunable (hyprctl eval, reverts) then bake here; no recompile.
+          keystone_rounding = 24;
+          # DROP SHADOW for dock windows (the "floating" lift). trapezoid.patch warps
+          # renderRoundedShadow through the same keystone homography, so the shadow is a
+          # soft TRAPEZOID matching the card, cut out under the window (glass stays clean).
+          # DOCK-ONLY (other windows' shadows stay at the global range 4) and LIVE-TUNABLE:
+          #   hyprctl eval 'hl.config({decoration={keystone_shadow_range=64, keystone_shadow_dy=22}})'
+          # then bake the number you like here. range=0 falls back to the global shadow.
+          keystone_shadow_range = 48;   # spread/softness of the shadow halo (logical px)
+          keystone_shadow_dx = 8;       # horizontal offset (+ = right)
+          keystone_shadow_dy = 14;      # vertical offset   (+ = down) -> down-right lift
+          keystone_shadow_alpha = 0.5;  # strength multiplier (x the global shadow colour's alpha)
+          # CURSOR PARALLAX: dock cards leaning toward the pointer -- DISABLED (0 = off). The
+          # motion was dizzying, so it's off. The code (OpenGL.cpp ksDockKeystone + the cursor
+          # damage hook) stays in trapezoid.patch but is fully inert at 0; bump this to ~0.05 to
+          # try it again, or ask to strip the code entirely.
+          keystone_parallax = 0;
         };
 
         /*
@@ -480,12 +638,11 @@ in
       # Finger counts swapped from upstream's (workspace on 3, move on 4) --
       # the same preference the pre-readopt commit 990f0f5 carried.
       gesture = [
-        # 4-finger free drag/move of the focused window.
-        {
-          fingers = 4;
-          direction = "swipe";
-          action = "move";
-        }
+        # 4-finger drag is CONTEXT-SENSITIVE (my.sidedock): focused on a dock card it shifts
+        # the pile (l=prev/r=next), elsewhere it moves the focused window. That needs a
+        # Lua-FUNCTION action to run the dock script with a direction, so it's a raw
+        # hl.gesture{} in features/sidedock/home.nix, not a string-action entry here. (It
+        # replaced the plain "move" gesture; movewindow gives the same dwindle swap.)
         # 3-finger vertical swipe: workspace switch, matching the touchscreen
         # gesture direction above and the "slidevert" animation style.
         {
@@ -493,17 +650,15 @@ in
           direction = "vertical";
           action = "workspace";
         }
-        # scroll_move (snake_case -- verified against source, NOT the legacy
-        # dispatcher's "scrollMove" spelling, which errors here:
-        # "hl.gesture: unknown action \"scrollMove\""): purpose-built gesture
-        # for the scrolling layout's tape -- live momentum + snap-to-column
-        # (gestures:scrolling:* defaults handle it). Inert while the layout
-        # is off, kept for the day it comes back.
-        {
-          fingers = 3;
-          direction = "horizontal";
-          action = "scroll_move";
-        }
+        # (The mission-control OVERVIEW is on SUPER+E, not a gesture: 5-finger swipes don't
+        # fire on this Dell touchpad. The "overview" gesture action + COverviewTrackpadGesture
+        # still exist in trapezoid.patch, so a working-finger gesture could be added here later.)
+        # 3-finger HORIZONTAL is claimed by the side-dock (my.sidedock): swipe LEFT
+        # shows the pile, RIGHT hides it. That needs a Lua-FUNCTION action (to run the
+        # dock script with a direction), which this string-action attrset can't express,
+        # so it's a raw hl.gesture{} in features/sidedock/home.nix instead of an entry
+        # here. (It replaced the old scroll_move gesture, which was inert with the
+        # scrolling layout off anyway.)
       ];
     };
 
@@ -604,14 +759,18 @@ in
       -- a custom ease-out is not available -- "linear" is the no-overshoot one.
       hl.animation({ leaf = "global", enabled = true, speed = 4, bezier = "linear" })
       hl.animation({ leaf = "windows", enabled = true, speed = 3, bezier = "linear" })
-      -- Window MOVES get their own ease-out -- the side-dock slide (my.sidedock) is
-      -- the main thing that moves, and it deserves a curve with some character. The
-      -- hl API's bezier list is only "linear"/"default", but hl.curve REGISTERS a
-      -- named one (the earlier note that hl.bezier is absent missed this): easeOutExpo
-      -- here -- a strong decelerate that still ENDS exactly at 1.0, so it glides in
-      -- without the "default" curve's overshoot/jelly. windowsMove is a child of
-      -- "windows"; overriding it leaves open/close (windowsIn/Out) on linear above.
-      hl.curve("dockslide", { type = "bezier", points = { { 0.16, 1.0 }, { 0.3, 1.0 } } })
+      -- Window MOVES get a SPRING -- the side-dock slide (my.sidedock) is the main thing
+      -- that moves, and Benjamin wants the park/show glide to have some bounce/"feel". The
+      -- hl API's bezier list is only "linear"/"default", but hl.curve REGISTERS a named one
+      -- (the earlier note that hl.bezier is absent missed this): an easeOutBack here -- the
+      -- second control point's y>1.0 makes the curve OVERSHOOT the target and settle back
+      -- (a spring), while still ENDING exactly at 1.0 so there's no residual drift. This is
+      -- the "jelly" the layers/windows curves deliberately avoid, but here it's WANTED --
+      -- and windowsMove is a child of "windows", so only MOVES spring (open/close = the
+      -- windowsIn/Out on linear above stay calm). NB this is global to every window move,
+      -- not just the dock; the dock is simply the one that moves far enough to show it.
+      -- Overshoot tunable via the 2nd point's y (1.0 = none, higher = bouncier).
+      hl.curve("dockslide", { type = "bezier", points = { { 0.34, 1.4 }, { 0.6, 1.0 } } })
       hl.animation({ leaf = "windowsMove", enabled = true, speed = 5, bezier = "dockslide" })
       hl.animation({ leaf = "border", enabled = true, speed = 3, bezier = "linear" })
       hl.animation({ leaf = "fade", enabled = true, speed = 3, bezier = "linear" })
@@ -650,6 +809,46 @@ in
         position = "auto-right",
         scale = 1,
       })
+
+      -- Persist runtime monitor scales across reloads. This fork re-executes the WHOLE Lua config
+      -- on every reload (hyprctl reload / config-only / the theme pipeline) and re-derives EVERY
+      -- output -- VERIFIED: ruled monitors snap back to their config scale, and any UNRULED output
+      -- (an opendisplay iPad, a runtime-scaled external) resets to its AUTO scale, which for a
+      -- 1920x1080 panel is 2x. There is no "leave monitors alone" flag on the fork. So re-apply
+      -- saved scales HERE, in-exec: an hl.monitor call makes that output "ruled", so it survives
+      -- the reload DETERMINISTICALLY (no stamp, no timing race -- hl.get_monitors() lets us do it
+      -- in pure Lua). Source of truth is a plain, hand/GUI-editable config file, one "<key><TAB>
+      -- <scale>" line per monitor, written by the capture hook in features/sidedock. Key is stable
+      -- across sessions: "opendisplay" (its output NAME is random each run), else "d:<description>"
+      -- for real monitors, else "n:<name>". eDP-1 + DP-1 stay config-managed above
+      -- (my.desktop.primaryOutputScale); HEADLESS-* (throwaway test outputs) are ignored.
+      do
+        local tab = string.char(9)
+        local saved = {}
+        local fh = io.open(os.getenv("HOME") .. "/.config/hypr/monitor-scales", "r")
+        if fh then
+          for line in fh:lines() do
+            local k, s = line:match("^(.-)" .. tab .. "([%d.]+)$")
+            if k and s then saved[k] = s end
+          end
+          fh:close()
+        end
+        for _, m in ipairs(hl.get_monitors()) do
+          local name = m.name or ""
+          local desc = m.description or ""
+          if name ~= "" and name ~= "${osConfig.my.desktop.primaryOutput}"
+             and name ~= "DP-1" and not name:match("^HEADLESS") then
+            local key
+            if name:match("^OpenDisplay") then key = "opendisplay"
+            elseif desc ~= "" then key = "d:" .. desc
+            else key = "n:" .. name end
+            local s = saved[key]
+            if s then
+              hl.monitor({ output = name, mode = "preferred", position = "auto", scale = tonumber(s) })
+            end
+          end
+        end
+      end
 
       -- Confine the pen to the Wacom (DP-1) at the COMPOSITOR level. On a
       -- multi-monitor Wayland desktop, letting OTD target a specific monitor via
@@ -709,6 +908,11 @@ in
       hl.window_rule({ match = { class = "^(org.gnu.emacs)$" }, scrolling_width = 1.0 })
       -- Matplotlib floating
       hl.window_rule({ match = { class = "^(Matplotlib)$" }, float = true })
+      -- opendisplay-gui (iPad-as-display sender) floats rather than tiling. Wayland app-id is the
+      -- FULL "org.opendisplay.desktop" -- Qt's setDesktopFileName("org.opendisplay.desktop") keeps
+      -- the .desktop suffix in the app-id (verified live via hyprctl clients .class); an earlier
+      -- "^(org\\.opendisplay)$" anchored rule never matched, so the window tiled.
+      hl.window_rule({ match = { class = "^(org\\.opendisplay\\.desktop)$" }, float = true })
       -- Waydroid size lock
       hl.window_rule({ match = { class = "^(Waydroid)$" }, scrolling_width = 1.0 })
       -- Glassmorphism: translucent KDE apps; backdrop blur applies to
@@ -802,7 +1006,11 @@ in
       hl.bind(mod .. " + T", hl.dsp.exec_cmd("kitty"))
       hl.bind(mod .. " + W", hl.dsp.exec_cmd("firefox"))
       hl.bind(mod .. " + B", hl.dsp.exec_cmd("dolphin"))
-      hl.bind(mod .. " + E", hl.dsp.exec_cmd("emacsclient -c"))
+      -- SUPER+E toggles the mission-control OVERVIEW (expo). 5-finger trackpad gestures
+      -- don't fire on this Dell touchpad, so a keybind drives it instead; hl.dsp.overview
+      -- is a native dispatcher added by trapezoid.patch (-> CHyprRenderer::ksOverviewToggle).
+      -- (Was emacsclient -c; emacs is still on SUPER+SHIFT+E's neighbours if wanted back.)
+      hl.bind(mod .. " + E", hl.dsp.overview())
       -- On-screen keyboard: toggle the wvkbd overlay (handy with the Wacom pen).
       hl.bind(mod .. " + O", hl.dsp.exec_cmd("${wvkbdToggle}"))
       -- Compositor-level IME toggle, same logic as niri.nix's Hangul bind.
@@ -824,15 +1032,16 @@ in
 
       -- Media transport, locked = true so it drives playback FROM THE LOCK SCREEN
       -- too (the hyprlock music widget reflects the new state on its next poll).
-      -- XF86 keys for keyboards that emit them; SUPER combos as the reliable
-      -- lock-screen fallback -- SUPER+P = play/pause, SUPER+[ / ] = prev / next.
-      -- NOT SUPER+space: that is the app-menu launcher in the unlocked compositor,
-      -- and a locked = true bind fires unlocked too, so it would collide.
+      -- XF86 keys for keyboards that emit them; SUPER+[ / ] as the reliable lock-screen
+      -- prev/next fallback. NO SUPER+P fallback here: it COLLIDED with the screenshot bind
+      -- in features/hakuspace/compositor.nix (Hyprland fires EVERY bind on a combo, so one
+      -- press screenshotted AND toggled playback) -- play/pause stays on XF86AudioPlay /
+      -- the Fn media key. NOT SUPER+space either: that is the app-menu launcher in the
+      -- unlocked compositor, and a locked = true bind fires unlocked too, so it collides.
       -- playerctl resolves on the compositor's PATH, same as wpctl.
       hl.bind("XF86AudioPlay", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
       hl.bind("XF86AudioNext", hl.dsp.exec_cmd("playerctl next"), { locked = true })
       hl.bind("XF86AudioPrev", hl.dsp.exec_cmd("playerctl previous"), { locked = true })
-      hl.bind(mod .. " + P", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
       hl.bind(mod .. " + bracketright", hl.dsp.exec_cmd("playerctl next"), { locked = true })
       hl.bind(mod .. " + bracketleft", hl.dsp.exec_cmd("playerctl previous"), { locked = true })
 
@@ -1018,35 +1227,59 @@ in
       hl.bind(mod .. " + SHIFT + CTRL + K", hl.dsp.window.move({ monitor = "u" }))
       hl.bind(mod .. " + SHIFT + CTRL + L", hl.dsp.window.move({ monitor = "r" }))
 
-      -- Workspaces: PAGE-RELATIVE, not absolute.
+      -- Workspaces: PER-MONITOR, with a rofi "which screen?" picker for cross-screen jumps.
       --
-      -- Super+N goes to slot N of the group of ten containing the focused
-      -- workspace, so on workspace 15 Super+1 means 11. The digits keep meaning
-      -- "first slot of what I am looking at" instead of an id you have to
-      -- remember. A shell drawing a workspace strip derives its page the same
-      -- way, from the live focused workspace, so the two cannot drift -- see
-      -- features/dms/plugins/workspaces for the one that does.
+      -- Each screen owns a decade of workspaces, pinned so switching never slips. Decades follow
+      -- SCREEN ORDER left-to-right -- nothing hardcoded: leftmost screen = ws 1-10 (named A1..A10),
+      -- next = 11-20 (B1..), etc. (dynamic pin block below + its features/sidedock twin for hotplug;
+      -- the chess names drive the waybar display).
       --
-      -- The persistent workspace_rule calls that used to be here are GONE. They
-      -- existed to force the DankBar switcher to render a fixed 1-9; the plugin
-      -- draws ten slots whether or not the workspaces exist, so keeping them
-      -- would only pin page 0 into existence while every other page stayed
-      -- ephemeral -- an asymmetry with no upside.
-      -- SHIFT as a second spelling for move-to-slot, alongside CTRL: the
-      -- SUPER+SHIFT+<n> convention from stock Hyprland/most WMs. Both stay --
-      -- CTRL mirrors the CTRL+U/I workspace-move pair above, SHIFT is muscle
-      -- memory.
-      for i = 1, 9 do
-        hl.bind(mod .. " + " .. tostring(i), hl.dsp.exec_cmd("${wsSlot} " .. tostring(i)))
-        hl.bind(mod .. " + CTRL + " .. tostring(i), hl.dsp.exec_cmd("${wsSlot} " .. tostring(i) .. " move"))
-        hl.bind(mod .. " + SHIFT + " .. tostring(i), hl.dsp.exec_cmd("${wsSlot} " .. tostring(i) .. " move"))
+      --   SUPER+<n>       -> workspace <n> on the CURRENT screen (never slips). ONE monitor: instant.
+      --                      MULTIPLE monitors: a rofi "which screen?" menu, current pre-selected
+      --                      (Enter = stay here; pick another screen to jump to its ws <n>).
+      --   SHIFT/CTRL+<n>  -> same, but MOVE the active window to the chosen target.
+      -- Single monitor stays pure Lua (instant, decade 0); multi-monitor hands off to the wsPick
+      -- rofi script. (This replaced an earlier hold-a-letter gesture -- too fiddly.)
+      local function wsGo(slot)
+        return function()
+          if #hl.get_monitors() <= 1 then hl.dispatch(hl.dsp.focus({ workspace = slot }))
+          else hl.dispatch(hl.dsp.exec_cmd("${wsPick} " .. tostring(slot))) end
+        end
       end
-      -- 0 is the tenth slot, keeping the row of digits contiguous.
-      hl.bind(mod .. " + 0", hl.dsp.exec_cmd("${wsSlot} 10"))
-      hl.bind(mod .. " + CTRL + 0", hl.dsp.exec_cmd("${wsSlot} 10 move"))
-      hl.bind(mod .. " + SHIFT + 0", hl.dsp.exec_cmd("${wsSlot} 10 move"))
+      local function wsMove(slot)
+        return function()
+          if #hl.get_monitors() <= 1 then hl.dispatch(hl.dsp.window.move({ workspace = slot, follow = true }))
+          else hl.dispatch(hl.dsp.exec_cmd("${wsPick} " .. tostring(slot) .. " move")) end
+        end
+      end
 
-      hl.bind(mod .. " + SHIFT + E", hl.dsp.exit())
+      -- Per-monitor workspaces: pin each decade to a screen (left-to-right), chess-name them, and
+      -- evacuate orphaned windows -- see wsManageLua in the let above. Apply at every config
+      -- load/reload HERE, and re-run on every live monitor change (hotplug/disconnect) via the hook
+      -- below, which also captures runtime scales. (Formerly split/duplicated into features/sidedock;
+      -- hl.on stacks + reload clears handlers, so this is the single owner now.)
+      ${wsManageLua}
+      hl.on("monitor.layout_changed", function()
+        ${wsManageLua}
+        hl.dispatch(hl.dsp.exec_cmd("${scalePersist}"))
+      end)
+
+      -- SHIFT and CTRL are both move-to-workspace (CTRL mirrors the CTRL+U/I pair above; SHIFT is
+      -- the stock-Hyprland muscle memory). 0 is the tenth slot, keeping the digit row contiguous.
+      for i = 1, 9 do
+        hl.bind(mod .. " + " .. tostring(i), wsGo(i))
+        hl.bind(mod .. " + CTRL + " .. tostring(i), wsMove(i))
+        hl.bind(mod .. " + SHIFT + " .. tostring(i), wsMove(i))
+      end
+      hl.bind(mod .. " + 0", wsGo(10))
+      hl.bind(mod .. " + CTRL + 0", wsMove(10))
+      hl.bind(mod .. " + SHIFT + 0", wsMove(10))
+
+      -- SUPER+SHIFT+E was hl.dsp.exit() -- a one-keystroke LOG OUT sitting right next to
+      -- SUPER+E (overview). Way too easy to hit by accident ("panic button"). Rebound to
+      -- emacs (which lost its key when SUPER+E became the overview). To quit the session
+      -- use the greeter / `loginctl terminate-session`, not a stray keybind.
+      hl.bind(mod .. " + SHIFT + E", hl.dsp.exec_cmd("emacsclient -c"))
       -- --clipboard-only skips writing a file at all (hyprshot otherwise saves
       -- AND copies); --silent matches grimblast's old no-notification default.
       hl.bind("Print", hl.dsp.exec_cmd("hyprshot -m region --clipboard-only --silent"))
