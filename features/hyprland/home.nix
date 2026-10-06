@@ -177,36 +177,15 @@ let
   # scheme in the keybinds below -- SUPER+<n> switches on the CURRENT screen (instant on one
   # monitor), and with multiple monitors the wsPick rofi picker (defined below) asks which screen.
 
-  # Single-instance launcher for opendisplay-gui, pointed at by the .desktop override below so the
-  # app-menu entry goes through it. opendisplay-gui is BOTH the control window AND the background
-  # daemon that serves the iPad (it holds a live OpenDisplay-* virtual monitor), so a naive
-  # relaunch from the menu just piles up processes (and orphan virtual monitors). The app has no
-  # single-instance socket / DBus activation / --show flag (verified in the binary), so it CANNOT
-  # be told to re-show its window. User chose "reuse, never disrupt":
-  #   1. a control window is open  -> focus it (no duplicate),
-  #   2. serving headless (window closed, daemon alive) -> DON'T spawn a second; notify instead,
-  #      leaving the live iPad connection untouched,
-  #   3. nothing running -> launch.
-  # Focus schema is hl.dsp.focus({ window = <userdata> }) (verified live; {address=...} does NOT
-  # work). pgrep matches the wrapped Qt binary in the cmdline, which never matches this launcher.
+  # opendisplay-gui is BOTH the control window AND the background daemon that serves the iPad (it
+  # holds a live OpenDisplay-* virtual monitor), so a naive relaunch from the menu/rofi would pile
+  # up processes and orphan virtual monitors. Upstream now ships a native single-instance flag:
+  # `opendisplay-gui --activate-existing` connects to the running instance over a QLocalSocket and
+  # re-shows its config window -- without restarting the stream -- then exits without a duplicate;
+  # with nothing running it starts normally. That supersedes the old pgrep/focus/notify wrapper
+  # (which couldn't re-show the window at all), so it's gone -- the .desktop override below (which
+  # rofi's drun reads too) just passes the flag.
   opendisplayPkg = pkgs.callPackage ../opendisplay/package.nix { };
-  opendisplayLauncher = pkgs.writeShellScript "opendisplay-single" ''
-    export PATH=${lib.makeBinPath [ pkgs.hyprland pkgs.jq pkgs.libnotify pkgs.procps pkgs.coreutils opendisplayPkg ]}:$PATH
-    cls="org.opendisplay.desktop"
-    # 1) control window already open -> focus it, no duplicate
-    if [ -n "$(hyprctl clients -j | jq -r --arg c "$cls" '.[]|select(.class==$c)|.address' | head -1)" ]; then
-      hyprctl eval "for _,w in ipairs(hl.get_windows()) do if tostring(w.class)=='org.opendisplay.desktop' then hl.dispatch(hl.dsp.focus({ window = w })) break end end" >/dev/null 2>&1
-      exit 0
-    fi
-    # 2) serving headless (daemon alive, window closed) -> don't start a second; notify
-    if pgrep -f '\.opendisplay-gui-wrapped' >/dev/null 2>&1; then
-      notify-send -a OpenDisplay -i "$cls" "OpenDisplay already running" \
-        "Serving your iPad in the background. The app can't re-show its window without restarting the stream, so your connection was left running instead of opening a duplicate." >/dev/null 2>&1
-      exit 0
-    fi
-    # 3) nothing running -> launch
-    exec opendisplay-gui "$@"
-  '';
 
   # rofi "which screen?" picker for SUPER+<n> when MORE THAN ONE monitor is connected (the single-
   # monitor case is handled inline in Lua -- instant, no menu). Lists screens left-to-right (A, B,
@@ -365,15 +344,16 @@ in
   ];
 
   # Override opendisplay's own app-menu entry (org.opendisplay.desktop, from the package) so it
-  # launches through the single-instance launcher instead of spawning a fresh opendisplay-gui
-  # every time. ~/.local/share/applications wins over the system entry by XDG precedence. Fields
-  # mirror the package's .desktop. StartupNotify off: the launcher usually exits without opening a
-  # window (focus/notify paths), and a startup spinner that never resolves is worse than none.
+  # launches with --activate-existing (native single-instance: show the running instance's window
+  # instead of spawning a fresh opendisplay-gui) rather than the package's bare opendisplay-gui.
+  # ~/.local/share/applications wins over the system entry by XDG precedence, and rofi's drun reads
+  # the same file. Fields mirror the package's .desktop. StartupNotify off: a re-launch just shows
+  # the existing window and exits, so a startup spinner that never resolves is worse than none.
   xdg.desktopEntries = lib.mkIf (osConfig.my.desktop.compositor == "hyprland") {
     "org.opendisplay.desktop" = {
       name = "OpenDisplay";
       comment = "Use an iOS device as a Wayland display";
-      exec = "${opendisplayLauncher}";
+      exec = "${opendisplayPkg}/bin/opendisplay-gui --activate-existing";
       icon = "org.opendisplay.desktop";
       terminal = false;
       categories = [ "Utility" "System" ];

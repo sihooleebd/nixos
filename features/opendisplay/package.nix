@@ -25,7 +25,7 @@
 # needs the GPU VAAPI driver; else it falls back to software libx264.
 stdenv.mkDerivation (finalAttrs: {
   pname = "opendisplay-linux";
-  version = "1.14.0-unstable-2026-10-03";
+  version = "1.14.0-unstable-2026-10-06";
 
   # Benjamin's own fork, not tixwho's. The portal/output-controller fixes and
   # the capture/encode rework that used to be carried here as a local patch
@@ -34,8 +34,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "sihooleebd";
     repo = "opendisplay-linux";
-    rev = "96a847a411c72df3fda7698d2f587813744ae0f1"; # branch linux-port HEAD
-    hash = "sha256-zzeWNVCZHUR5XZ7I7fXPyekVGE6kcykmGoe1N4lrdLY=";
+    rev = "d6a4d4d50a5ad18802c6ef92a01184dc0fcf026f"; # branch linux-port HEAD
+    hash = "sha256-a0pypBnrI47qS5K0P5WSMUYvoX+6ClQ8lqYWXbit+Vk=";
   };
 
   # The CMake project is the Linux/ subtree (upstream builds with `cmake -S opendisplay/Linux`).
