@@ -187,6 +187,35 @@ let
   # rofi's drun reads too) just passes the flag.
   opendisplayPkg = pkgs.callPackage ../opendisplay/package.nix { };
 
+  # Input lock (bound to SUPER+SHIFT+K below): toggle "ignore the laptop keyboard + touchpad" -- for
+  # writing / resting a hand on the deck while on the move. Two halves:
+  #   - KEYBOARD: a "inputlock" submap (defined in the Lua binds) whose catchall swallows EVERY key;
+  #     only the toggle itself (submap_universal) still fires, to unlock. Can't just disable the
+  #     keyboard device -- then the unlock keybind would die too.
+  #   - TOUCHPAD: this script disables the laptop touchpad device(s) via hl.device, found BY NAME
+  #     (test("touchpad") over hyprctl devices) so it isn't tied to this host's device string; it
+  #     leaves external mice alone. Re-enables on unlock.
+  # State is a runtime-dir flag so a second press toggles back; a reboot clears it (a lock shouldn't
+  # survive a reboot). NB this is LIVE state -- a compositor config reload (monitor hotplug etc.)
+  # resets the submap + device config, so a lock won't survive one; re-press to re-lock.
+  inputLockToggle = pkgs.writeShellScript "hypr-input-lock" ''
+    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.libnotify pkgs.coreutils ]}:$PATH
+    state="''${XDG_RUNTIME_DIR:-/tmp}/haku-inputlock"
+    pads=$(hyprctl devices -j | jq -r '.mice[]?.name | select(test("touchpad";"i"))')
+    setpads() { for d in $pads; do hyprctl eval "hl.device({ name = \"$d\", enabled = $1 })" >/dev/null 2>&1; done; }
+    if [ -e "$state" ]; then
+      rm -f "$state"
+      setpads true
+      hyprctl eval 'hl.dispatch(hl.dsp.submap("reset"))' >/dev/null 2>&1
+      notify-send -a InputLock "Input unlocked" "Keyboard + touchpad back on." >/dev/null 2>&1
+    else
+      : > "$state"
+      setpads false
+      hyprctl eval 'hl.dispatch(hl.dsp.submap("inputlock"))' >/dev/null 2>&1
+      notify-send -a InputLock "Input locked" "Keyboard + touchpad ignored. Press ${osConfig.my.hyprland.modKey}+SHIFT+K to unlock." >/dev/null 2>&1
+    fi
+  '';
+
   # rofi "which screen?" picker for SUPER+<n> when MORE THAN ONE monitor is connected (the single-
   # monitor case is handled inline in Lua -- instant, no menu). Lists screens left-to-right (A, B,
   # C... matching the workspace decades + the chess bar labels), with the current screen
@@ -1206,6 +1235,19 @@ in
       hl.bind(mod .. " + SHIFT + CTRL + J", hl.dsp.window.move({ monitor = "d" }))
       hl.bind(mod .. " + SHIFT + CTRL + K", hl.dsp.window.move({ monitor = "u" }))
       hl.bind(mod .. " + SHIFT + CTRL + L", hl.dsp.window.move({ monitor = "r" }))
+
+      -- Input lock (SUPER+SHIFT+K): ignore the laptop keyboard + touchpad for writing / resting on
+      -- the deck while on the move. The "inputlock" submap's catchall swallows EVERY key; this toggle
+      -- is submap_universal so it still fires there to unlock (the touchpad half is done by the
+      -- script via hl.device). While locked, ONLY this keybind does anything. Wrapped: define_submap
+      -- self-guards its body, and the pcall means a bad bind form just fails to register rather than
+      -- blanking the whole session (see the Lua-config-escaping blackout note).
+      pcall(function()
+        hl.define_submap("inputlock", function()
+          hl.bind("catchall", hl.dsp.no_op())
+        end)
+        hl.bind(mod .. " + SHIFT + K", hl.dsp.exec_cmd("${inputLockToggle}"), { submap_universal = true })
+      end)
 
       -- Workspaces: PER-MONITOR, with a rofi "which screen?" picker for cross-screen jumps.
       --

@@ -9,7 +9,7 @@ let
   # hyprctl + jq on its PATH. hyprctl comes from the RUNNING compositor's own
   # package so the IPC protocol always matches.
   dock = pkgs.writeShellScript "sidedock" ''
-    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.coreutils ]}''${PATH:+:$PATH}
+    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.coreutils pkgs.swaynotificationcenter pkgs.quickshell osConfig.my.panelbus.package ]}''${PATH:+:$PATH}
     exec ${pkgs.writeShellScript "sidedock-impl" (builtins.readFile ./dock.sh)} "$@"
   '';
 
@@ -72,6 +72,17 @@ let
   dockClassSet = "{ " + lib.concatMapStringsSep ", " (c: ''["${c}"] = true'') (cfg.apps ++ [ dockTermClass ]) + " }";
 in
 lib.mkIf (osConfig.my.sidedock.enable && inScope && osConfig.my.desktop.compositor == "hyprland") {
+  # Expose the dock on PATH as `sidedock` so OTHER features can drive it without a store-path
+  # cross-reference -- features/hakuspace's SUPER+N parks the dock (`sidedock hide`) for the
+  # mutually-exclusive notification centre. The dock's own binds still use ${dock} directly; this is
+  # just the cross-feature entry point.
+  home.packages = [ (pkgs.writeShellScriptBin "sidedock" ''exec ${dock} "$@"'') ];
+
+  # panelbus close handler (features/panelbus): how the dock gets closed when another special window
+  # opens. Absolute ${dock} so it runs regardless of the firing context's PATH; `hide` parks the pile.
+  # (PiPs deliberately do NOT participate -- a keystone PiP can coexist with the dock/notif.)
+  xdg.configFile."panelbus/handlers/dock".text = "${dock} hide";
+
   wayland.windowManager.hyprland.extraConfig = lib.mkAfter ''
       -- Side dock: light apps live on a right-edge panel as a CASCADE STACK.
       -- SUPER+D toggles the pile (show <-> park; parking remembers the front so

@@ -69,6 +69,12 @@
     # my.sidedock app-class references are unchanged -- only the source moves).
     sonora.url = "github:sihooleebd/sononora/feat/niche-fixes-and-features";
 
+    # late.sh CLI (mpiorowski/late-sh) -- the `late` companion CLI, consumed from the project's own
+    # flake (packages.<system>.late). Builds from source so it links + runs here (no nix-ld), unlike
+    # the curl|bash installer's prebuilt binary. No nixpkgs.follows: let it build against its own pin
+    # + binary cache, same as sonora above.
+    late-sh.url = "github:mpiorowski/late-sh";
+
   };
 
   outputs =

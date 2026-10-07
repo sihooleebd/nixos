@@ -530,9 +530,12 @@ in
           ExecStart = "${hyprlockBgGen}";
         };
       };
-      hakuspace-notifications = themed (
+      # swaync is REPLACED by the quickshell notif centre (features/notifcenter) when that's on --
+      # two daemons can't both own org.freedesktop.Notifications. Gated so my.notifcenter.enable=false
+      # brings swaync straight back (the fallback if the quickshell centre misbehaves).
+      hakuspace-notifications = lib.mkIf (!osConfig.my.notifcenter.enable) (themed (
         service "Haku Space notification centre" "${pkgs.swaynotificationcenter}/bin/swaync"
-      );
+      ));
       hakuspace-idle = service "Haku Space idle daemon" "${pkgs.hypridle}/bin/hypridle";
       # Gamma + kbd-backlight RESET on every session start -- the safety net for the gamma
       # idle dim (features/hakuspace dim path). The user has no gamma control, so if a crash
@@ -572,6 +575,10 @@ in
         Supervising waybar directly would start it before any layout had been
         chosen -- and on a first login there is no config to read at all.
       */
+      # waybar stays the PRIMARY bar -- it has the rich modules the HUD doesn't replicate (battery
+      # mode, right-click network config, per-module scroll, tray, etc.). The statushub is an
+      # experimental left text HUD running ALONGSIDE it, NOT a replacement, so waybar is not gated.
+      # (Re-add `lib.mkIf (!osConfig.my.statushub.enable)` only once the HUD reaches real parity.)
       hakuspace-bar = themed (oneshot "Haku Space bar" (bin "waybar_manager.sh"));
       hakuspace-dockbar = themed (oneshot "Haku Space dockbar" "${bin "dockbar_manager.sh"} --startup");
     };
@@ -756,12 +763,13 @@ in
             ${audioSinkMenu} ${pkgs.pavucontrol}/bin/pavucontrol
         '';
 
-        # Workspace button TEXT colours for the per-monitor/chess-notation scheme (features/hyprland,
-        # features/sidedock): black on the active (light) button, white on the inactive (dimmed)
-        # ones. Appended to style.css so it wins the cascade -- no upstream anchor to drift, unlike
-        # substituteInPlace. (ext/workspaces renders as #workspaces button in every layout.)
+        # Workspace button TEXT colour for the per-monitor/chess-notation scheme (features/hyprland,
+        # features/sidedock): hardwired black on every button state, independent of the
+        # haku_theme accent. Appended to style.css so it wins the cascade -- no upstream
+        # anchor to drift, unlike substituteInPlace. (ext/workspaces renders as
+        # #workspaces button in every layout.)
         addWsColors = ''
-          printf '\n/* per-monitor workspaces: active=black text, inactive=white text */\n#workspaces button { color: #ffffff; }\n#workspaces button.active { color: #000000; }\n' >> $out/style.css
+          printf '\n/* per-monitor workspaces: text hardwired black in all states */\n#workspaces button, #workspaces button.active, #workspaces button.empty, #workspaces button.overview { color: #000000; }\n' >> $out/style.css
         '';
 
         # Drop waybar's inline "cava" module from the bar: it SEGV's in getIcon on a style reload
@@ -862,6 +870,22 @@ in
           pkgs.runCommand "hakuspace-swaync-gtk4-fixed" { } ''
             cp -r ${share}/swaync $out
             chmod -R u+w $out
+            ${lib.optionalString osConfig.my.hyprland.keystone.enable ''
+              # Dock-SHAPE the control centre: size/place it to a sidedock card's footprint so the
+              # compositor keystone (extended to the "swaync-control-center" LAYER in
+              # features/hyprland/trapezoid.patch) warps it into the SAME trapezoid, and it occupies
+              # the dock's slot -- the two are toggled mutually exclusive (SUPER+N parks the dock;
+              # showing the dock closes this). Values match features/sidedock's live geom on the dell
+              # (2400x1350 logical: DW 800, right HGAP 40, top barH+VGAP 104, bottom VGAP 48,
+              # DOCK_H 1198); gated on keystone.enable so only the dell (where the dock lives) gets
+              # them. A very different monitor would want these redone (they're static, unlike the
+              # dock's live recompute).
+              ${pkgs.jq}/bin/jq '.positionX="right" | .positionY="top"
+                | .["control-center-width"]=800 | .["control-center-height"]=1198
+                | .["control-center-margin-top"]=104 | .["control-center-margin-bottom"]=48
+                | .["control-center-margin-right"]=40 | .["control-center-margin-left"]=0' \
+                $out/config.json > $out/config.json.tmp && mv $out/config.json.tmp $out/config.json
+            ''}
             cat >> $out/style.css <<'EOF'
 
             /* Appended by features/hakuspace (nix): GTK4 selector fix for the
@@ -1371,18 +1395,24 @@ ROFIBLUR
           exit 0
         '';
 
-        # Idle condition for the DIM + LOCK listeners: block them while a media player is
-        # PLAYING, so a video isn't dimmed/locked mid-watch. The stock idle_inhibit.sh (exec'd
-        # below) is MEANT to block on an active audio stream, but its pactl sink-input check
-        # does not trigger on this pipewire setup (verified: a playing YouTube still dims) --
-        # and it misses muted video anyway. playerctl is reliable, so check it FIRST: any
-        # player Playing -> exit 1 (hypridle blocks the on-timeout + retries). Else defer to
-        # idle_inhibit.sh for the nosleep toggle. Video vs audio isn't cleanly separable, so
-        # music also holds the screen -- the user accepts that and locks manually when needed.
+        # Idle condition for the DIM + LOCK listeners: block them (exit 1 -> hypridle defers the
+        # on-timeout + keeps retrying) when EITHER (1) a media player is PLAYING, so a video isn't
+        # dimmed/locked mid-watch, or (2) the notification-centre nosleep toggle is ON. Both are read
+        # DIRECTLY, the SAME way suspendGate reads them -- NOT via the stock idle_inhibit.sh these
+        # used to defer to. That script is unreliable (its opening `hypridle -V` check misbehaves in
+        # the daemon's PATH, and its pactl sink-input check never fires on this pipewire setup -- a
+        # playing YouTube still dimmed), so after the AOD rework the nosleep toggle silently stopped
+        # blocking dim/lock. playerctl is reliable (also catches the muted video the audio check
+        # missed); nosleep is the SAME state file the toggle writes
+        # (~/.local/state/haku_theme/idle_inhibit = 1), so the toggle now genuinely holds dim + lock
+        # (and AOD with them -- AOD is gated on `pidof hyprlock`, which blocking the lock prevents).
+        # Video vs audio isn't cleanly separable, so music also holds the screen -- accepted; lock
+        # manually when needed.
         mediaIdleCond = pkgs.writeShellScript "hakuspace-media-idle-cond" ''
           export PATH=${lib.makeBinPath [ pkgs.playerctl pkgs.gnugrep pkgs.coreutils ]}:$PATH
           playerctl -a status 2>/dev/null | grep -q '^Playing$' && exit 1
-          exec "$HOME/.local/bin/idle_inhibit.sh"
+          [ "$(cat "$HOME/.local/state/haku_theme/idle_inhibit" 2>/dev/null)" = 1 ] && exit 1
+          exit 0
         '';
 
         /*

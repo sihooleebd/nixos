@@ -39,6 +39,18 @@ let
   */
   rofi = pkgs.rofi.override { plugins = [ pkgs.rofi-emoji ]; };
 
+  # SUPER+N notification-centre toggle, made MUTUALLY EXCLUSIVE with the sidedock: opening the panel
+  # parks the dock first, because both claim the right-edge slot and the keystone trapezoid shape
+  # (the compositor keystones the "swaync-control-center" layer so the panel IS a dock-card shape --
+  # see features/hyprland/trapezoid.patch; geometry matched in features/hakuspace home.nix). `sidedock`
+  # is the dock's PATH wrapper (features/sidedock); the guard makes this a plain toggle on a host with
+  # no dock. The reverse direction (showing the dock closes the panel) is in sidedock's dock.sh.
+  notifToggle = pkgs.writeShellScript "haku-notif-toggle" ''
+    export PATH=${lib.makeBinPath [ pkgs.swaynotificationcenter pkgs.coreutils ]}''${PATH:+:$PATH}
+    command -v sidedock >/dev/null 2>&1 && sidedock hide >/dev/null 2>&1 || true
+    exec swaync-client -t -sw
+  '';
+
   # Toggle a rofi surface: a second press closes it instead of erroring "Rofi
   # already running". Both the drun launcher (SUPER+Space) and hakumenu
   # (SUPER+Tab, itself `rofi -show` with custom modes) are rofi, so one check
@@ -82,7 +94,7 @@ in
       hl.bind("${mod} + space", hl.dsp.exec_cmd("${rofiToggle} ${rofi}/bin/rofi -show drun"))
       hl.bind("${mod} + slash", hl.dsp.exec_cmd("${rofi}/bin/rofi -modi emoji -show emoji"))
       hl.bind("${mod} + Tab", hl.dsp.exec_cmd("${rofiToggle} ${bin "hakumenu.sh"}"))
-      hl.bind("${mod} + N", hl.dsp.exec_cmd("${pkgs.swaynotificationcenter}/bin/swaync-client -t -sw"))
+      ${lib.optionalString (!osConfig.my.notifcenter.enable) ''hl.bind("${mod} + N", hl.dsp.exec_cmd("${notifToggle}"))''}
       hl.bind("${mod} + V", hl.dsp.exec_cmd("${bin "clipboard_menu.sh"}"))
       hl.bind("${mod} + SHIFT + V", hl.dsp.exec_cmd("${bin "clipboard_menu.sh"} --wipe"))
 

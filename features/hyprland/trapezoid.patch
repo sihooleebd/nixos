@@ -1,6 +1,6 @@
 diff -ruN a/src/config/legacy/ConfigManager.cpp b/src/config/legacy/ConfigManager.cpp
---- a/src/config/legacy/ConfigManager.cpp	2026-10-06 08:39:35.595758944 +0900
-+++ b/src/config/legacy/ConfigManager.cpp	2026-10-06 08:39:35.668361315 +0900
+--- a/src/config/legacy/ConfigManager.cpp	2026-10-06 22:37:18.690664151 +0900
++++ b/src/config/legacy/ConfigManager.cpp	2026-10-06 22:37:27.239921703 +0900
 @@ -53,6 +53,7 @@
  #include "../../managers/input/trackpad/gestures/WorkspaceSwipeGesture.hpp"
  #include "../../managers/input/trackpad/gestures/ResizeGesture.hpp"
@@ -19,8 +19,8 @@ diff -ruN a/src/config/legacy/ConfigManager.cpp b/src/config/legacy/ConfigManage
          result =
              g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(std::string{data[startDataIdx + 1]}), fingerCount, direction, modMask, deltaScale, disableInhibit);
 diff -ruN a/src/config/lua/bindings/LuaBindingsConfigRules.cpp b/src/config/lua/bindings/LuaBindingsConfigRules.cpp
---- a/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 08:39:35.596160843 +0900
-+++ b/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 08:39:35.668696500 +0900
+--- a/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 22:37:18.691979073 +0900
++++ b/src/config/lua/bindings/LuaBindingsConfigRules.cpp	2026-10-06 22:37:27.240591318 +0900
 @@ -37,6 +37,7 @@
  #include "../../../managers/input/trackpad/gestures/FullscreenGesture.hpp"
  #include "../../../managers/input/trackpad/gestures/LuaFunctionGesture.hpp"
@@ -39,8 +39,8 @@ diff -ruN a/src/config/lua/bindings/LuaBindingsConfigRules.cpp b/src/config/lua/
              result = g_pTrackpadGestures->addGesture(makeUnique<CSpecialWorkspaceGesture>(workspaceName), fingerCount, direction, modMask, deltaScale, disableInhibit);
          else if (action == "close")
 diff -ruN a/src/config/lua/bindings/LuaBindingsDispatchers.cpp b/src/config/lua/bindings/LuaBindingsDispatchers.cpp
---- a/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 08:39:35.596223289 +0900
-+++ b/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 08:39:35.668895181 +0900
+--- a/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 22:37:18.692163906 +0900
++++ b/src/config/lua/bindings/LuaBindingsDispatchers.cpp	2026-10-06 22:37:27.241064618 +0900
 @@ -14,6 +14,7 @@
  #include "../../../devices/IKeyboard.hpp"
  #include "../../../desktop/rule/windowRule/WindowRule.hpp"
@@ -78,8 +78,8 @@ diff -ruN a/src/config/lua/bindings/LuaBindingsDispatchers.cpp b/src/config/lua/
          Internal::setFn(L, "release_input_capture", hlReleaseInputCapture);
          Internal::setFn(L, "focus", hlFocus);
 diff -ruN a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
---- a/src/config/values/ConfigValues.cpp	2026-10-06 08:39:35.598792291 +0900
-+++ b/src/config/values/ConfigValues.cpp	2026-10-06 08:39:35.669087178 +0900
+--- a/src/config/values/ConfigValues.cpp	2026-10-06 22:37:18.700211577 +0900
++++ b/src/config/values/ConfigValues.cpp	2026-10-06 22:37:27.241420660 +0900
 @@ -201,6 +201,18 @@
                  {.min = 0, .max = 20, .refresh = Supplementary::REFRESH_WINDOW_STATES | Supplementary::REFRESH_BLUR_FB}),
          MS<Float>("decoration:rounding_power", "rounding power of corners (2 is a circle)", 2,
@@ -100,9 +100,9 @@ diff -ruN a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.
          MS<Float>("decoration:inactive_opacity", "opacity of inactive windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
          MS<Float>("decoration:fullscreen_opacity", "opacity of fullscreen windows.", 1, {.min = 0, .max = 1, .refresh = Supplementary::REFRESH_WINDOW_STATES}),
 diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTester.cpp
---- a/src/desktop/state/ViewHitTester.cpp	2026-10-06 08:39:35.601064426 +0900
-+++ b/src/desktop/state/ViewHitTester.cpp	2026-10-06 08:40:51.935260618 +0900
-@@ -254,6 +254,72 @@
+--- a/src/desktop/state/ViewHitTester.cpp	2026-10-06 22:37:18.709097296 +0900
++++ b/src/desktop/state/ViewHitTester.cpp	2026-10-07 11:23:39.503670384 +0900
+@@ -254,6 +254,82 @@
      return windowForWorkspace(false);
  }
  
@@ -112,15 +112,16 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
 +// land at the wrong surface point. Undo it: map the box-relative hit through
 +// H^-1, so pointer / touch / pen-as-pointer follow the transformed window. Same
 +// inset/shrink config as the renderer; identity for any non-dock/un-tuned window.
-+static Vector2D ksHitInverse(const PHLWINDOW& window, Vector2D rel) {
-+    if (!window->m_ruleApplicator || !window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
-+        return rel;
++// Shared core: map a box-relative hit `rel` (in a box of size `sz`) through the forward keystone's
++// INVERSE, so pointer/touch/pen follow the rendered trapezoid. Returns the un-warped box-relative
++// coord, or the sentinel (-1e6) for a hit in the vacated strip beside the trapezoid (a miss). Used
++// by both the dock-WINDOW wrapper below and the swaync control-centre LAYER (layerSurfaceAt).
++static Vector2D ksHitInverseBox(const Vector2D& sz, Vector2D rel) {
 +    static auto PINSET  = CConfigValue<Config::FLOAT>("decoration:keystone_inset");
 +    static auto PSHRINK = CConfigValue<Config::FLOAT>("decoration:keystone_shrink");
 +    const float inset = *PINSET, shrink = *PSHRINK;
 +    if (inset <= 0.0001f && shrink <= 0.0001f)
 +        return rel;
-+    const Vector2D sz = window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
 +    if (sz.x <= 0 || sz.y <= 0)
 +        return rel;
 +    // forward homography H (unit square -> trapezoid), identical to the renderer
@@ -156,6 +157,15 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
 +    return Vector2D(su * sz.x, sv * sz.y);
 +}
 +
++// Dock-WINDOW wrapper: only dock-tagged windows; box = GEOMETRIC_GOAL size (the space callers pass
++// `rel` in). Non-dock windows pass through unchanged. The swaync control-centre LAYER calls
++// ksHitInverseBox directly (see layerSurfaceAt), since it isn't a window.
++static Vector2D ksHitInverse(const PHLWINDOW& window, Vector2D rel) {
++    if (!window->m_ruleApplicator || !window->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++        return rel;
++    return ksHitInverseBox(window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL), rel);
++}
++
 +// Dock keystone (input side, X11): the Wayland pointer path runs through windowSurfaceAt(),
 +// which applies ksHitInverse -- but that function asserts !m_isX11, so X11 dock windows
 +// (e.g. Wine apps) never got the inverse and their clicks hit the FLAT rectangle: the right
@@ -175,7 +185,7 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
  SP<CWLSurfaceResource> CViewHitTester::windowSurfaceAt(const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) const {
      if (!validMapped(window))
          return nullptr;
-@@ -269,7 +335,11 @@
+@@ -269,7 +345,11 @@
          return PPOPUP->wlSurface()->resource();
      }
  
@@ -188,9 +198,27 @@ diff -ruN a/src/desktop/state/ViewHitTester.cpp b/src/desktop/state/ViewHitTeste
      if (surf) {
          surfaceLocal = local;
          return surf;
+@@ -349,7 +429,16 @@
+         if (!ls->aliveAndVisible() || (aboveLockscreen && ls->m_ruleApplicator->aboveLock().valueOrDefault() != 2))
+             continue;
+ 
+-        auto [surf, local] = ls->m_layerSurface->m_surface->at(pos - ls->m_geometry.pos(), true);
++        Vector2D lrel = pos - ls->m_geometry.pos();
++        // Keystone the quickshell notification-centre layer (features/notifcenter) like a dock card:
++        // map the hit through the SAME inverse the renderer warps by, so clicks follow the trapezoid.
++        // A sentinel (x < -1e5) is a hit in the vacated strip beside it -> a miss, fall through.
++        if (ls->m_namespace.starts_with("haku-notifcenter")) {
++            lrel = ksHitInverseBox(ls->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT), lrel);
++            if (lrel.x < -1.0e5)
++                continue;
++        }
++        auto [surf, local] = ls->m_layerSurface->m_surface->at(lrel, true);
+ 
+         if (surf) {
+             if (!surf->m_current.inputIsInfinite && surf->m_current.input.empty())
 diff -ruN a/src/desktop/state/ViewHitTester.hpp b/src/desktop/state/ViewHitTester.hpp
---- a/src/desktop/state/ViewHitTester.hpp	2026-10-06 08:39:35.601088374 +0900
-+++ b/src/desktop/state/ViewHitTester.hpp	2026-10-06 08:39:35.669411247 +0900
+--- a/src/desktop/state/ViewHitTester.hpp	2026-10-06 22:37:18.709151970 +0900
++++ b/src/desktop/state/ViewHitTester.hpp	2026-10-06 22:37:27.241882499 +0900
 @@ -22,6 +22,10 @@
          PHLWINDOW              windowAt(const Vector2D& pos, uint16_t properties, PHLWINDOW ignoreWindow = nullptr) const;
          SP<CWLSurfaceResource> windowSurfaceAt(const Vector2D& pos, PHLWINDOW window, Vector2D& surfaceLocal) const;
@@ -203,8 +231,8 @@ diff -ruN a/src/desktop/state/ViewHitTester.hpp b/src/desktop/state/ViewHitTeste
          SP<CWLSurfaceResource> layerPopupSurfaceAt(const Vector2D& pos, const std::vector<PHLLSREF>* layerSurfaces, Vector2D* surfaceCoords, PHLLS* layerFound) const;
          SP<CWLSurfaceResource> layerSurfaceAt(const Vector2D& pos, std::vector<PHLLSREF>* layerSurfaces, Vector2D* surfaceCoords, PHLLS* layerFound,
 diff -ruN a/src/managers/input/InputManager.cpp b/src/managers/input/InputManager.cpp
---- a/src/managers/input/InputManager.cpp	2026-10-06 08:39:35.606405069 +0900
-+++ b/src/managers/input/InputManager.cpp	2026-10-06 08:40:35.448237067 +0900
+--- a/src/managers/input/InputManager.cpp	2026-10-06 22:37:18.730264417 +0900
++++ b/src/managers/input/InputManager.cpp	2026-10-06 22:37:27.242144017 +0900
 @@ -239,6 +239,19 @@
      if (MOUSECOORDSFLOORED == m_lastCursorPosFloored && !refocus)
          return;
@@ -287,8 +315,8 @@ diff -ruN a/src/managers/input/InputManager.cpp b/src/managers/input/InputManage
          m_currentlyHeldButtons.push_back(e.button);
      } else {
 diff -ruN a/src/managers/input/trackpad/gestures/FloatGesture.cpp b/src/managers/input/trackpad/gestures/FloatGesture.cpp
---- a/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 08:39:35.606891287 +0900
-+++ b/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 08:39:35.669807555 +0900
+--- a/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 22:37:18.733087004 +0900
++++ b/src/managers/input/trackpad/gestures/FloatGesture.cpp	2026-10-06 22:37:27.242504750 +0900
 @@ -36,6 +36,14 @@
      if (!m_window)
          return;
@@ -305,8 +333,8 @@ diff -ruN a/src/managers/input/trackpad/gestures/FloatGesture.cpp b/src/managers
          m_window.reset();
          return;
 diff -ruN a/src/managers/input/trackpad/gestures/MoveGesture.cpp b/src/managers/input/trackpad/gestures/MoveGesture.cpp
---- a/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 08:39:35.607016618 +0900
-+++ b/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 08:39:35.669908193 +0900
+--- a/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 22:37:18.733685905 +0900
++++ b/src/managers/input/trackpad/gestures/MoveGesture.cpp	2026-10-06 22:37:27.242658596 +0900
 @@ -10,6 +10,12 @@
  
      m_window    = Desktop::focusState()->window();
@@ -322,7 +350,7 @@ diff -ruN a/src/managers/input/trackpad/gestures/MoveGesture.cpp b/src/managers/
  void CMoveTrackpadGesture::update(const ITrackpadGesture::STrackpadGestureUpdate& e) {
 diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.cpp b/src/managers/input/trackpad/gestures/OverviewGesture.cpp
 --- a/src/managers/input/trackpad/gestures/OverviewGesture.cpp	1970-01-01 09:00:00.000000000 +0900
-+++ b/src/managers/input/trackpad/gestures/OverviewGesture.cpp	2026-10-06 08:39:35.669980124 +0900
++++ b/src/managers/input/trackpad/gestures/OverviewGesture.cpp	2026-10-06 22:37:27.242829829 +0900
 @@ -0,0 +1,20 @@
 +#include "OverviewGesture.hpp"
 +
@@ -346,7 +374,7 @@ diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.cpp b/src/manag
 +}
 diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.hpp b/src/managers/input/trackpad/gestures/OverviewGesture.hpp
 --- a/src/managers/input/trackpad/gestures/OverviewGesture.hpp	1970-01-01 09:00:00.000000000 +0900
-+++ b/src/managers/input/trackpad/gestures/OverviewGesture.hpp	2026-10-06 08:39:35.670052989 +0900
++++ b/src/managers/input/trackpad/gestures/OverviewGesture.hpp	2026-10-06 22:37:27.242948561 +0900
 @@ -0,0 +1,19 @@
 +#pragma once
 +
@@ -368,8 +396,8 @@ diff -ruN a/src/managers/input/trackpad/gestures/OverviewGesture.hpp b/src/manag
 +    virtual void end(const ITrackpadGesture::STrackpadGestureEnd& e);
 +};
 diff -ruN a/src/render/decorations/CHyprDropShadowDecoration.cpp b/src/render/decorations/CHyprDropShadowDecoration.cpp
---- a/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 08:39:35.612849399 +0900
-+++ b/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 08:39:35.670128208 +0900
+--- a/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 22:37:18.754184870 +0900
++++ b/src/render/decorations/CHyprDropShadowDecoration.cpp	2026-10-06 22:37:27.243091084 +0900
 @@ -128,6 +128,21 @@
      static auto PSHADOWSCALE  = CConfigValue<Config::FLOAT>("decoration:shadow:scale");
      static auto PSHADOWOFFSET = CConfigValue<Config::VEC2>("decoration:shadow:offset");
@@ -423,9 +451,9 @@ diff -ruN a/src/render/decorations/CHyprDropShadowDecoration.cpp b/src/render/de
  }
  
 diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
---- a/src/render/OpenGL.cpp	2026-10-06 08:39:35.612462792 +0900
-+++ b/src/render/OpenGL.cpp	2026-10-06 08:39:35.670321521 +0900
-@@ -1498,6 +1498,109 @@
+--- a/src/render/OpenGL.cpp	2026-10-06 22:37:18.752463244 +0900
++++ b/src/render/OpenGL.cpp	2026-10-07 11:22:36.831999332 +0900
+@@ -1498,6 +1498,132 @@
      }
  }
  
@@ -446,9 +474,32 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +// the surface's own projection -- this keeps multi-surface apps (Qt/KDE, e.g.
 +// dolphin) composing into ONE trapezoid instead of warping each piece alone. For
 +// the main surface T == identity, reducing to base*H. Input mirror: ViewHitTester.
-+static std::array<GLfloat, 9> ksDockKeystone(const std::array<GLfloat, 9>& base, const CBox& surfBox, bool allowParallax = true) {
++// The box the keystone warps into a trapezoid, for the CURRENT render target: a dock-tagged WINDOW,
++// OR the quickshell notification-centre LAYER (features/notifcenter), so the SUPER+N panel takes the
++// SAME trapezoid shape as a dock card. Fills the LOGICAL position/size of whichever it is; false for
++// anything else. Layer match is by namespace ("haku-notifcenter" -- the sized control panel, NOT the
++// transient "haku-notif-popup" toasts); change the prefix here to keystone a different layer.
++static bool ksTargetBox(const PHLLSREF& currentLS, Vector2D& pos, Vector2D& sz) {
 +    const auto w = g_pHyprRenderer->m_renderData.currentWindow;
-+    if (!w || !w->m_ruleApplicator || !w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false))
++    if (w && w->m_ruleApplicator && w->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++        pos = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++        sz  = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++        return true;
++    }
++    // currentLS comes from the STextureRenderData (the renderer's m_renderData has no layer field);
++    // renderTextureInternal passes data.currentLS down. Shadow pass passes {} -> window-only.
++    const auto ls = currentLS.lock();
++    if (ls && ls->m_namespace.starts_with("haku-notifcenter")) {
++        pos = ls->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++        sz  = ls->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++        return true;
++    }
++    return false;
++}
++
++static std::array<GLfloat, 9> ksDockKeystone(const std::array<GLfloat, 9>& base, const CBox& surfBox, bool allowParallax = true, const PHLLSREF& currentLS = {}) {
++    Vector2D ksPos, ksSz;
++    if (!ksTargetBox(currentLS, ksPos, ksSz))
 +        return base;
 +    static auto PINSET  = CConfigValue<Config::FLOAT>("decoration:keystone_inset");
 +    static auto PSHRINK = CConfigValue<Config::FLOAT>("decoration:keystone_shrink");
@@ -464,8 +515,8 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
 +    // window box to the SAME physical space (subtract logical monitor origin, then *scale)
 +    // so T is identity for the main surface and a correct fraction for sub-surfaces.
 +    const float    MSCALE = MON ? sc<float>(MON->m_scale) : 1.0f;
-+    const Vector2D winPos = (w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - (MON ? MON->m_position : Vector2D{0, 0})) * MSCALE;
-+    const Vector2D winSz  = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT) * MSCALE;
++    const Vector2D winPos = (ksPos - (MON ? MON->m_position : Vector2D{0, 0})) * MSCALE;
++    const Vector2D winSz  = ksSz * MSCALE;
 +    if (winSz.x <= 0 || winSz.y <= 0 || surfBox.width <= 0 || surfBox.height <= 0)
 +        return base;
 +    // H: window unit square -> trapezoid (Heckbert square-to-quad)
@@ -535,30 +586,29 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
  void CHyprOpenGLImpl::renderTextureInternal(SP<ITexture> tex, const CBox& box, const STextureRenderData& data) {
      RASSERT(g_pHyprRenderer->m_renderData.pMonitor, "Tried to render texture without begin()!");
      RASSERT(tex, "Attempted to draw nullptr texture!");
-@@ -1538,7 +1641,29 @@
+@@ -1538,7 +1664,28 @@
  
      auto shader = renderToOutput ? renderToOutputInternal() : renderToFBInternal(tex, data, tex->m_type, newBox);
  
 -    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, glMatrix.getMatrix());
-+    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, ksDockKeystone(glMatrix.getMatrix(), newBox));
++    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, ksDockKeystone(glMatrix.getMatrix(), newBox, true, data.currentLS));
 +    // dock keystone: hand surface.frag the corner radius (px) + window size so it draws
 +    // anti-aliased ROUNDED edges that follow the trapezoid (keystoneCoverage()). Set for
 +    // BOTH the window texture and the separate frosted-blur pass (both come through here),
 +    // so their edges coincide. 0 for any non-dock window -> the shader no-ops.
 +    {
-+        const auto ksWin = g_pHyprRenderer->m_renderData.currentWindow;
 +        float      ksR = 0.f, ksSX = 0.f, ksSY = 0.f;
-+        if (ksWin && ksWin->m_ruleApplicator && ksWin->m_ruleApplicator->m_tagKeeper.isTagged("dock", false)) {
++        Vector2D   ksUPos, ksUSz;
++        if (ksTargetBox(data.currentLS, ksUPos, ksUSz)) { // dock-tagged window OR the swaync control-centre layer
 +            static auto PKSROUND = CConfigValue<Config::FLOAT>("decoration:keystone_rounding");
 +            const auto  KSMON    = g_pHyprRenderer->m_renderData.pMonitor;
 +            const float KSSCALE  = KSMON ? sc<float>(KSMON->m_scale) : 1.0f;
-+            const auto  KSSZ     = ksWin->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
 +            ksR  = *PKSROUND;
 +            // PHYSICAL size (v_boxUV is 0..1, keystoneSize scales it to px): keeps the SDF
 +            // distance in physical px so the fwidth() AA feather stays ~1px and the corner
 +            // radius is consistent regardless of monitor scale (matches the T fix above).
-+            ksSX = sc<float>(KSSZ.x) * KSSCALE;
-+            ksSY = sc<float>(KSSZ.y) * KSSCALE;
++            ksSX = sc<float>(ksUSz.x) * KSSCALE;
++            ksSY = sc<float>(ksUSz.y) * KSSCALE;
 +        }
 +        shader->setUniformFloat(SHADER_KEYSTONE_ROUND, ksR);
 +        shader->setUniformFloat2(SHADER_KEYSTONE_SIZE, ksSX, ksSY);
@@ -566,7 +616,7 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
      shader->setUniformInt(SHADER_TEX, 0);
      GLCALL(glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO)));
  
-@@ -2362,7 +2487,39 @@
+@@ -2362,7 +2509,39 @@
  
      if (needsCM)
          shader->setUniformInt(SHADER_SOURCE_TF, TF);
@@ -607,7 +657,7 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
  
      CHyprColor color;
      if (!grad1.m_colors.empty())
-@@ -2379,18 +2536,18 @@
+@@ -2379,18 +2558,18 @@
          shader->setUniform4fv(SHADER_GRADIENT2, grad2.m_colorsOkLabA.size() / 4, grad2.m_colorsOkLabA);
      shader->setUniformInt(SHADER_GRADIENT2_LENGTH, grad2.m_colorsOkLabA.size() / 4);
      shader->setUniformFloat(SHADER_ANGLE2, sc<int>(grad2.m_angle / (std::numbers::pi / 180.0)) % 360 * (std::numbers::pi / 180.0));
@@ -630,7 +680,7 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
      shader->setUniformFloat(SHADER_ROUNDING_POWER, roundingPower);
      shader->setUniformFloat(SHADER_RANGE, range);
      shader->setUniformFloat(SHADER_SHADOW_POWER, SHADOWPOWER);
-@@ -2427,7 +2584,10 @@
+@@ -2427,7 +2606,10 @@
                  const auto cutoutTopLeft     = scaledWindowBox.pos() - newBox.pos();
                  const auto cutoutBottomRight = cutoutTopLeft + scaledWindowBox.size();
  
@@ -643,8 +693,8 @@ diff -ruN a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
  
                  shader->setUniformFloat2(SHADER_WINDOW_TOP_LEFT, sc<float>(cutoutTopLeft.x), sc<float>(cutoutTopLeft.y));
 diff -ruN a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePassElement.cpp
---- a/src/render/pass/SurfacePassElement.cpp	2026-10-06 08:39:35.613846056 +0900
-+++ b/src/render/pass/SurfacePassElement.cpp	2026-10-06 08:39:35.670606920 +0900
+--- a/src/render/pass/SurfacePassElement.cpp	2026-10-06 22:37:18.757971998 +0900
++++ b/src/render/pass/SurfacePassElement.cpp	2026-10-06 22:37:27.243798796 +0900
 @@ -7,6 +7,7 @@
  #include "../../managers/input/InputManager.hpp"
  #include "../../layout/LayoutManager.hpp"
@@ -672,8 +722,8 @@ diff -ruN a/src/render/pass/SurfacePassElement.cpp b/src/render/pass/SurfacePass
  
      const float ALPHA = m_data.alpha * m_data.fadeAlpha * (PSURFACE ? PSURFACE->m_alphaModifier * PSURFACE->m_overallOpacity : 1.F);
 diff -ruN a/src/render/Renderer.cpp b/src/render/Renderer.cpp
---- a/src/render/Renderer.cpp	2026-10-06 08:39:35.612593705 +0900
-+++ b/src/render/Renderer.cpp	2026-10-06 08:39:35.670867910 +0900
+--- a/src/render/Renderer.cpp	2026-10-06 22:37:18.752984143 +0900
++++ b/src/render/Renderer.cpp	2026-10-06 22:37:27.244139425 +0900
 @@ -2075,7 +2075,9 @@
  
      // tearing and DS first
@@ -855,8 +905,8 @@ diff -ruN a/src/render/Renderer.cpp b/src/render/Renderer.cpp
          return false;
  
 diff -ruN a/src/render/Renderer.hpp b/src/render/Renderer.hpp
---- a/src/render/Renderer.hpp	2026-10-06 08:39:35.612638445 +0900
-+++ b/src/render/Renderer.hpp	2026-10-06 08:39:35.671126576 +0900
+--- a/src/render/Renderer.hpp	2026-10-06 22:37:18.753284044 +0900
++++ b/src/render/Renderer.hpp	2026-10-06 22:37:27.244668507 +0900
 @@ -101,6 +101,20 @@
          SP<IFramebuffer>                    makeSnapshotFB(WP<Desktop::View::CPopup>);
          void                                renderFadeouts(PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace = nullptr);
@@ -879,8 +929,8 @@ diff -ruN a/src/render/Renderer.hpp b/src/render/Renderer.hpp
          virtual void                        startRenderPass() {};
          virtual void                        endRender(const std::function<void()>& renderingDoneCallback = {}) = 0;
 diff -ruN a/src/render/Shader.cpp b/src/render/Shader.cpp
---- a/src/render/Shader.cpp	2026-10-06 08:39:35.612659188 +0900
-+++ b/src/render/Shader.cpp	2026-10-06 08:39:35.671250347 +0900
+--- a/src/render/Shader.cpp	2026-10-06 22:37:18.753380003 +0900
++++ b/src/render/Shader.cpp	2026-10-06 22:37:27.244843863 +0900
 @@ -187,6 +187,8 @@
      m_uniformLocations[SHADER_RADIUS]                    = getUniform("radius");
      m_uniformLocations[SHADER_RADIUS_OUTER]              = getUniform("radiusOuter");
@@ -891,8 +941,8 @@ diff -ruN a/src/render/Shader.cpp b/src/render/Shader.cpp
      m_uniformLocations[SHADER_HALFPIXEL]                 = getUniform("halfpixel");
      m_uniformLocations[SHADER_RANGE]                     = getUniform("range");
 diff -ruN a/src/render/Shader.hpp b/src/render/Shader.hpp
---- a/src/render/Shader.hpp	2026-10-06 08:39:35.612678442 +0900
-+++ b/src/render/Shader.hpp	2026-10-06 08:39:35.671363441 +0900
+--- a/src/render/Shader.hpp	2026-10-06 22:37:18.753446749 +0900
++++ b/src/render/Shader.hpp	2026-10-06 22:37:27.244970457 +0900
 @@ -91,6 +91,11 @@
      SHADER_BLUR_ALPHA,
      SHADER_TONEMAP_MODE,
@@ -906,8 +956,8 @@ diff -ruN a/src/render/Shader.hpp b/src/render/Shader.hpp
  };
  
 diff -ruN a/src/render/shaders/glsl/surface.frag b/src/render/shaders/glsl/surface.frag
---- a/src/render/shaders/glsl/surface.frag	2026-10-06 08:39:35.614473168 +0900
-+++ b/src/render/shaders/glsl/surface.frag	2026-10-06 08:39:35.671475493 +0900
+--- a/src/render/shaders/glsl/surface.frag	2026-10-06 22:37:18.760392155 +0900
++++ b/src/render/shaders/glsl/surface.frag	2026-10-06 22:37:27.245130591 +0900
 @@ -6,6 +6,7 @@
  
  precision         highp float;
@@ -993,8 +1043,8 @@ diff -ruN a/src/render/shaders/glsl/surface.frag b/src/render/shaders/glsl/surfa
  #endif
  }
 diff -ruN a/src/render/shaders/glsl/tex300.vert b/src/render/shaders/glsl/tex300.vert
---- a/src/render/shaders/glsl/tex300.vert	2026-10-06 08:39:35.614492361 +0900
-+++ b/src/render/shaders/glsl/tex300.vert	2026-10-06 08:39:35.671577308 +0900
+--- a/src/render/shaders/glsl/tex300.vert	2026-10-06 22:37:18.760454002 +0900
++++ b/src/render/shaders/glsl/tex300.vert	2026-10-06 22:37:27.245236701 +0900
 @@ -10,10 +10,17 @@
  out vec4 v_color;
  out vec2 v_texcoord;
@@ -1015,8 +1065,8 @@ diff -ruN a/src/render/shaders/glsl/tex300.vert b/src/render/shaders/glsl/tex300
 +    v_boxUV = pos;
  }
 diff -ruN a/src/render/shaders/glsl/tex320.vert b/src/render/shaders/glsl/tex320.vert
---- a/src/render/shaders/glsl/tex320.vert	2026-10-06 08:39:35.614552318 +0900
-+++ b/src/render/shaders/glsl/tex320.vert	2026-10-06 08:39:35.671644838 +0900
+--- a/src/render/shaders/glsl/tex320.vert	2026-10-06 22:37:18.760506889 +0900
++++ b/src/render/shaders/glsl/tex320.vert	2026-10-06 22:37:27.245337003 +0900
 @@ -10,10 +10,17 @@
  out vec4 v_color;
  out vec2 v_texcoord;

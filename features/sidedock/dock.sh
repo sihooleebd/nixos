@@ -30,8 +30,19 @@ geom() {
   # x/y are already logical. max_by picks the rightmost monitor; nothing is hardcoded to 1920.
   read -r W H X0 Y0 < <($HC monitors -j | $J -r 'max_by(.x + (.width/(.scale//1)))|"\(.width/(.scale//1)|round) \(.height/(.scale//1)|round) \(.x) \(.y)"')
   [ -n "${W:-}" ] && [ "$W" -gt 0 ] 2>/dev/null || { W=1920; H=1080; X0=0; Y0=0; }   # fallback
-  # top-bar (waybar) height on this monitor (already logical), so the dock clears it
-  barH=$($HC layers -j | $J -r '[.[].levels|to_entries[].value[]|select(.namespace=="waybar")|.h]|max // 0')
+  # Waybar footprint, classified by ORIENTATION (hakuspace ships horizontal AND vertical layouts).
+  # A horizontal bar (wide + short) offsets the dock vertically; a VERTICAL bar (tall + narrow) must
+  # NOT be read as a top offset -- its .h is the WHOLE display height, which drove DOCK_H negative and
+  # broke the dock entirely. A vertical bar on the RIGHT instead insets the pile horizontally; one on
+  # the left doesn't touch the right-edge dock. (Layer geom is logical, same frame as W/H.)
+  read -r BW BH BX BY < <($HC layers -j | $J -r \
+    '[.[].levels|to_entries[].value[]|select(.namespace=="waybar")]|(max_by(.w*.h)//{})|"\(.w//0) \(.h//0) \(.x//0) \(.y//0)"')
+  barTop=0; barBottom=0; barRight=0
+  if [ "${BH:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$BH" -lt $((H*3/4)) ]; then
+      if [ "$BY" -lt $((Y0 + H/2)) ]; then barTop=$BH; else barBottom=$BH; fi   # horizontal: top vs bottom
+    elif [ "$BX" -ge $((X0 + W/2)) ]; then barRight=$BW; fi                      # vertical bar on the right edge
+  fi
   # panel width scales with the viewport (~1/3 of the logical width -> 640 on a 1920 view,
   # 800 on a 2400 view), clamped so cards stay usable on very small / very large screens.
   DW=$((W/3)); [ "$DW" -lt 420 ] && DW=420; [ "$DW" -gt 900 ] && DW=900
@@ -47,9 +58,9 @@ geom() {
   DLEFT=$((DW/30))                   # per-depth LEFT drift of the card center (slight)
   SHRINK=9; MAXD=3                   # per-depth size shrink (%); deepest visible depth
   STAGGER=0.035                      # seconds between cards on show/park -> a bit of "feel"
-  DOCK_Y=$((Y0 + barH + VGAP))
-  DOCK_H=$((H - barH - 2*VGAP))
-  SHOWN_X=$((X0 + W - DW - HGAP))     # front (depth 0) x
+  DOCK_Y=$((Y0 + barTop + VGAP))
+  DOCK_H=$((H - barTop - barBottom - 2*VGAP))
+  SHOWN_X=$((X0 + W - DW - HGAP - barRight))   # front (depth 0) x; a vertical right-edge bar insets it
   PARKED_X=$((X0 + W))                # fully off the right edge
 }
 
@@ -159,6 +170,7 @@ park_all() {
 # Show the pile at the remembered front (falling back to the first window).
 show_pile() {
   local -a o; mapfile -t o < <(order); [ ${#o[@]} -eq 0 ] && return 1
+  panelbus open dock 2>/dev/null || true   # dock is becoming visible -> close the other special panels
   local want=""; [ -f "$STATE" ] && want="$(cat "$STATE" 2>/dev/null)"
   { [ -z "$want" ] || ! exists "$want"; } && want="${o[0]}"
   render "$want" 1
@@ -168,6 +180,7 @@ is_dock() { $J -e --arg a "$1" 'any(.[]; .address==$a and (.tags|any(rtrimstr("*
 is_pip()  { $J -e --arg a "$1" 'any(.[]; .address==$a and (.tags|any(rtrimstr("*")=="pip")))'  <<<"$CLIENTS" >/dev/null 2>&1; }
 dock_send() {  # give a window the dock shape + tag, then lay it out as the front
   local a="$1"
+  panelbus open dock 2>/dev/null || true   # docking shows the pile -> close the other special panels
   ensure_float "$a"
   d "hl.dsp.window.tag({tag=\"+dock\", window=\"address:$a\"})"
   # (size + lock is applied by render(), from the live geometry -- not here.)
@@ -269,6 +282,7 @@ dock_from_pip() {  # SUPER+SHIFT+D on a PiP: fold it into the cascade pile inste
   # still pip-tagged + mini-sized -- the limbo this whole change removes.
   local a="$1"
   d "hl.dsp.window.tag({tag=\"-pip\", window=\"address:$a\"})"
+  panelbus open dock 2>/dev/null || true   # folding into the dock makes it visible -> close the notif centre
   d "hl.dsp.window.set_prop({prop=\"min_size\", value=\"0 0\", window=\"address:$a\"})"
   d "hl.dsp.window.set_prop({prop=\"max_size\", value=\"99999 99999\", window=\"address:$a\"})"
   snap; render "$a"

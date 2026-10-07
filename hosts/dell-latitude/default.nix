@@ -190,6 +190,8 @@
     latex.enable = true;
     media.enable = true;
     desktop-apps.enable = true;
+    notifcenter.enable = true; # quickshell keystone notif panel (WIP, stage 1 PoC alongside swaync)
+    panelbus.enable = true;    # broadcast-on-open mutual exclusion for dock / notif
     diagnostics.enable = true;
     qt-dev.enable = true;
 
@@ -294,7 +296,10 @@
       gimp
       qalculate-qt # calculator (Qt build -- themes via qt6ct like the KDE apps)
       lunar-client # Minecraft client/launcher
-      discord
+      # discord lives in features/desktop-apps, wrapped there with
+      # --disable-features=WaylandFractionalScaleV1 for the 0.8 fractional-scale fix. A bare
+      # `discord` here (per-user profile) shadowed that wrapper in PATH over the systemPackages
+      # copy, so the fix never applied -- removed; desktop-apps is the single source now.
 
       # orbit: Benjamin's own terminal music player, built from source. Packaged
       # (not `cargo install`ed) because this host has no nix-ld, so a cargo binary
@@ -378,6 +383,16 @@
       # tuning/runtime-cache/lookup.nix, and a literal keeps it independent of
       # how pkgs is provided there.
       inputs.sonora.packages."x86_64-linux".default
+
+      # usbtree (gnomeria/usbtree): live USB device-tree TUI (Rust, no root/libusb). Straight from
+      # nixpkgs -- it's packaged there (0.1.1), so no in-flake build needed.
+      usbtree
+
+      # late.sh CLI (mpiorowski/late-sh): the `late` companion CLI (local audio) for the SSH social
+      # app. From its OWN flake (builds from source -> rpath-correct), not the prebuilt installer
+      # binary, which fails to run here with no nix-ld -- and which also only patched bash_profile,
+      # so fish never saw it. Literal system string like sonora above (raw-imported by lookup.nix).
+      inputs.late-sh.packages."x86_64-linux".late
 
       /*
         Display management (zoom/scale, placement, resolution, extend). Both
