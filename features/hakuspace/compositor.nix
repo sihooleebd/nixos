@@ -153,7 +153,13 @@ in
       -- a real blur, not a dim. NO ignore_alpha here: the backdrop is fully
       -- transparent, and ignore_alpha would EXCLUDE transparent pixels from the
       -- blur, leaving the desktop sharp. The centered box (mainbox) stays opaque.
-      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true })
+      -- animation = "fade": without an explicit layer animation, this fullscreen
+      -- layer inherits the global "layers" curve (a SLIDE), so on open the whole
+      -- transparent-blur layer slides up from the bottom edge and the centered box
+      -- rises with it -- it reads as "the menu blinks small/low then snaps to the
+      -- middle" (the pseudo-hidpi blink). A fade appears at the final size + centre
+      -- with only opacity ramping: no slide, no scale, no blink.
+      hl.layer_rule({ match = { namespace = "^(rofi)$" }, blur = true, animation = "fade" })
       hl.layer_rule({ match = { namespace = "^(swaync.*)$" }, blur = true, ignore_alpha = 0.05 })
     '';
   };

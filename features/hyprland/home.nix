@@ -583,6 +583,13 @@ in
           # damage hook) stays in trapezoid.patch but is fully inert at 0; bump this to ~0.05 to
           # try it again, or ask to strip the code entirely.
           keystone_parallax = 0;
+          # DOCK SLIDE-IN BOUNCE (R0K0R's per-card model; trapezoid.patch updateDockMoveAnimation).
+          # The FRONT card's move overshoots by keystone_bounce (0 = none); each card deeper in
+          # the pile keeps keystone_bounce_decay^depth of that, so the bounce damps card by card.
+          # depth comes from the dockd<N> tag dock.sh sets per card. Live-tunable then bake here;
+          # raise keystone_bounce for a springier pile, lower the decay to calm the back cards.
+          keystone_bounce = 0.2;
+          keystone_bounce_decay = 0.5;
         };
 
         /*
@@ -647,11 +654,16 @@ in
       # Finger counts swapped from upstream's (workspace on 3, move on 4) --
       # the same preference the pre-readopt commit 990f0f5 carried.
       gesture = [
-        # 4-finger drag is CONTEXT-SENSITIVE (my.sidedock): focused on a dock card it shifts
-        # the pile (l=prev/r=next), elsewhere it moves the focused window. That needs a
-        # Lua-FUNCTION action to run the dock script with a direction, so it's a raw
-        # hl.gesture{} in features/sidedock/home.nix, not a string-action entry here. (It
-        # replaced the plain "move" gesture; movewindow gives the same dwindle swap.)
+        # 4-finger drag = the built-in MOVE gesture. On a side-dock pile card (my.sidedock) the
+        # PATCHED CMoveTrackpadGesture (features/hyprland/trapezoid.patch) slides THAT card live
+        # under the finger and on release runs gestures:dock_swipe_exec (set in features/sidedock ->
+        # dock.sh gesture-move) to cycle or spring back; elsewhere it moves the focused window. This
+        # REPLACED the old Lua-function 4-finger gesture (one-shot on release) with continuous.
+        {
+          fingers = 4;
+          direction = "swipe";
+          action = "move";
+        }
         # 3-finger vertical swipe: workspace switch, matching the touchscreen
         # gesture direction above and the "slidevert" animation style.
         {
@@ -659,15 +671,20 @@ in
           direction = "vertical";
           action = "workspace";
         }
+        # 3-finger HORIZONTAL show/hide of the side-dock pile (my.sidedock), now CONTINUOUS: the
+        # PATCHED CDockPileTrackpadGesture (features/hyprland/trapezoid.patch) slides the WHOLE pile
+        # live under the fingers and on release runs gestures:dock_pile_exec (set in features/sidedock
+        # -> dock.sh gesture-pile) to settle shown/hidden or spring back. swipe LEFT reveals, RIGHT
+        # hides. This REPLACED the old one-shot Lua-FUNCTION gesture (which only decided the verb on
+        # release); a plain string action can express it now that the compositor owns the live slide.
+        {
+          fingers = 3;
+          direction = "horizontal";
+          action = "dockpile";
+        }
         # (The mission-control OVERVIEW is on SUPER+E, not a gesture: 5-finger swipes don't
         # fire on this Dell touchpad. The "overview" gesture action + COverviewTrackpadGesture
         # still exist in trapezoid.patch, so a working-finger gesture could be added here later.)
-        # 3-finger HORIZONTAL is claimed by the side-dock (my.sidedock): swipe LEFT
-        # shows the pile, RIGHT hides it. That needs a Lua-FUNCTION action (to run the
-        # dock script with a direction), which this string-action attrset can't express,
-        # so it's a raw hl.gesture{} in features/sidedock/home.nix instead of an entry
-        # here. (It replaced the old scroll_move gesture, which was inert with the
-        # scrolling layout off anyway.)
       ];
     };
 
@@ -768,19 +785,20 @@ in
       -- a custom ease-out is not available -- "linear" is the no-overshoot one.
       hl.animation({ leaf = "global", enabled = true, speed = 4, bezier = "linear" })
       hl.animation({ leaf = "windows", enabled = true, speed = 3, bezier = "linear" })
-      -- Window MOVES get a SPRING -- the side-dock slide (my.sidedock) is the main thing
-      -- that moves, and Benjamin wants the park/show glide to have some bounce/"feel". The
-      -- hl API's bezier list is only "linear"/"default", but hl.curve REGISTERS a named one
-      -- (the earlier note that hl.bezier is absent missed this): an easeOutBack here -- the
-      -- second control point's y>1.0 makes the curve OVERSHOOT the target and settle back
-      -- (a spring), while still ENDING exactly at 1.0 so there's no residual drift. This is
-      -- the "jelly" the layers/windows curves deliberately avoid, but here it's WANTED --
-      -- and windowsMove is a child of "windows", so only MOVES spring (open/close = the
-      -- windowsIn/Out on linear above stay calm). NB this is global to every window move,
-      -- not just the dock; the dock is simply the one that moves far enough to show it.
-      -- Overshoot tunable via the 2nd point's y (1.0 = none, higher = bouncier).
-      hl.curve("dockslide", { type = "bezier", points = { { 0.34, 1.4 }, { 0.6, 1.0 } } })
-      hl.animation({ leaf = "windowsMove", enabled = true, speed = 5, bezier = "dockslide" })
+      -- Window MOVES: the side-dock slide (my.sidedock) is the main thing that moves, and
+      -- Benjamin wants the park/show glide to have bounce/"feel". That bounce is now PER-CARD
+      -- and DAMPED along the pile (R0K0R's model, ported from keystone/05-dock-bounce-curves):
+      -- trapezoid.patch's updateDockMoveAnimation gives each dock card its OWN move curve that
+      -- overshoots by decoration:keystone_bounce * keystone_bounce_decay^depth -- depth from a
+      -- dockd<N> tag dock.sh sets per card -- so cards deeper in the pile bounce progressively
+      -- less. A single shared curve can't do that (Hyprland reads a curve LIVE, so switching it
+      -- between staggered cards bends the ones already in flight). So "dockslide" here is now a
+      -- plain FAST ease-out with NO overshoot (both control-point y = 1.0): it shapes only
+      -- NON-dock window moves; every dock card overrides it with its own __dockbounce_<Y> curve.
+      -- Tune the dock bounce via decoration:keystone_bounce / _decay (decoration block above),
+      -- NOT this curve. speed 3.5 = 350ms (was 500ms): the real slide-in spent the long tail idle.
+      hl.curve("dockslide", { type = "bezier", points = { { 0.16, 1.0 }, { 0.3, 1.0 } } })
+      hl.animation({ leaf = "windowsMove", enabled = true, speed = 3.5, bezier = "dockslide" })
       hl.animation({ leaf = "border", enabled = true, speed = 3, bezier = "linear" })
       hl.animation({ leaf = "fade", enabled = true, speed = 3, bezier = "linear" })
       -- Layer surfaces explicitly on the no-overshoot curve too: this is where
@@ -922,12 +940,25 @@ in
       -- the .desktop suffix in the app-id (verified live via hyprctl clients .class); an earlier
       -- "^(org\\.opendisplay)$" anchored rule never matched, so the window tiled.
       hl.window_rule({ match = { class = "^(org\\.opendisplay\\.desktop)$" }, float = true })
+      -- The portal FILE PICKER (org.freedesktop.impl.portal.FileChooser=kde -> xdg-desktop-portal-kde,
+      -- see features/session-services) must FLOAT, not tile. It's the native dialog Wine/KakaoTalk
+      -- (FileDialogPortal=always, features/kakaotalk) and GTK/Firefox all open to pick/save files. Its
+      -- Wayland app-id (.class) is "org.freedesktop.impl.portal.desktop.kde" (NOT "xdg-desktop-portal-kde"
+      -- -- that's only the window TITLE; verified live via hyprctl clients, where it showed floating:0).
+      hl.window_rule({ match = { class = "^(org\\.freedesktop\\.impl\\.portal\\.desktop\\.kde)$" }, float = true })
+      -- Wine's explorer.exe folder window (from KakaoTalk's "open folder") is redirected to Dolphin and
+      -- closed immediately (folderToDolphin, features/sidedock) -- float it so that brief moment doesn't
+      -- reshuffle the tiling layout. Only ever matches a real folder window; the systray goes through
+      -- xembedsniproxy and the Wine desktop shell isn't a normal window, so neither is affected.
+      hl.window_rule({ match = { class = "^(explorer\\.exe)$" }, float = true })
       -- Waydroid size lock
       hl.window_rule({ match = { class = "^(Waydroid)$" }, scrolling_width = 1.0 })
       -- Glassmorphism: translucent KDE apps; backdrop blur applies to
       -- translucent windows automatically (decoration.blur). kdeconnect
       -- covers all its windows (.app, .sms, -indicator, ...).
-      hl.window_rule({ match = { class = "^(org\\.kde\\.dolphin)$" }, opacity = "0.65 0.65" })
+      -- Dolphin FLOATS (it's the native file manager Wine/KakaoTalk's "open folder" lands in via
+      -- winebrowser->xdg-open, and a general utility) rather than tiling. opacity = glassmorphism.
+      hl.window_rule({ match = { class = "^(org\\.kde\\.dolphin)$" }, float = true, opacity = "0.65 0.65" })
       hl.window_rule({ match = { class = "^(org\\.kde\\.kdeconnect.*)$" }, opacity = "0.65 0.65" })
       -- Claude Desktop: app_id from the deb's desktop-file StartupWMClass
       -- (Chromium derives it from package.json desktopName). Same 0.65 as
@@ -986,8 +1017,9 @@ in
       hl.window_rule({ match = { class = "^(com\\.github\\.wwmm\\.easyeffects)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(wdisplays)$" }, float = true, center = true })
       hl.window_rule({ match = { class = "^(qt6ct)$" }, float = true, center = true })
-      -- KakaoTalk (Wine) opens as a floating window. Class is the exe basename.
-      hl.window_rule({ match = { class = "^(kakaotalk\\.exe)$" }, float = true })
+      -- KakaoTalk (Wine, class = exe basename) is now auto-routed into the side dock
+      -- (my.sidedock.apps "kakaotalk.exe" in hosts/dell-latitude) -- that route rule
+      -- floats + sizes + pins it AND suppresses its self-raise, so no float rule here.
       -- xembedsniproxy's XEmbed host container is a 32x32 X11 window it reparents
       -- Wine's tray icon into. KDE keeps it off-screen; Hyprland maps it as a tiny
       -- black dot at 0,0. It must stay MAPPED for the embed to work, so don't kill

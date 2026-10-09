@@ -474,14 +474,20 @@
 
     hakuspace.enable = true;
     # Right-edge cascade dock (SUPER+D shifts the pile, SUPER+SHIFT+D parks it):
-    # sonora + easyeffects auto-route in; SUPER+SHIFT+T opens a docked terminal;
-    # push any other window in with SUPER+ALT+D. See features/sidedock.
+    # sonora, easyeffects + KakaoTalk auto-route in; SUPER+SHIFT+T opens a docked
+    # terminal; push any other window in with SUPER+ALT+D. See features/sidedock.
     sidedock = {
       enable = true;
       # Bare regex bodies (each wrapped ^(...)$). Dots are left unescaped: a
       # backslash here would reach the generated Lua as an invalid string escape
       # (\.), and "." matching any char still matches the literal app-id fine.
-      apps = [ "sonora" "com.github.wwmm.easyeffects" ];
+      # kakaotalk.exe = EVERY KakaoTalk (Wine) window + its children/popups (they
+      # all share the exe class); its own float rule in features/hyprland is dropped
+      # in favour of this route. The tray pill is class explorer.exe, NOT matched
+      # here, so it stays with xembedsniproxy (see kakaotalk-wine-setup). NB the route
+      # rule deliberately does NOT suppress activate -- that blocked KakaoTalk from
+      # restoring its window from the tray (see the note in features/sidedock/home.nix).
+      apps = [ "sonora" "com.github.wwmm.easyeffects" "kakaotalk.exe" ];
     };
     # EXPERIMENTAL: perspective-trapezoid render for dock windows (patches the
     # compositor). Enabled to BUILD the patched binary for nested testing; do NOT

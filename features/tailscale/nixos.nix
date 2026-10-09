@@ -58,7 +58,22 @@ in
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
-    { services.tailscale.enable = true; }
+    {
+      services.tailscale.enable = true;
+
+      # DNS robustness across network changes. Without systemd-resolved, NM (dns=default) AND tailscale
+      # MagicDNS both rewrite /etc/resolv.conf directly, so after a Wi-Fi change tailscale's forwarder is
+      # left pointing at a stale upstream -> health "dns-forward-failing" -> it can't resolve the control
+      # plane -> ~90s wedge -> the watchdog restarts it. systemd-resolved gives tailscale proper split-DNS
+      # (it registers MagicDNS via the resolved API while NM registers each link's own servers), so the
+      # upstream updates instantly and nothing fights over resolv.conf. tailscale auto-detects resolved.
+      services.resolved.enable = true;
+      networking.networkmanager.dns = "systemd-resolved";
+
+      # Stop NM randomizing the Wi-Fi MAC during scans: tailscaled reads the hwaddr flip as a MAJOR link
+      # change and does a full rebind on every scan/blip. A stable MAC = far fewer spurious rebinds.
+      networking.networkmanager.wifi.scanRandMacAddress = false;
+    }
 
     (lib.mkIf cfg.watchdog.enable {
       systemd.services.tailscale-watchdog = {

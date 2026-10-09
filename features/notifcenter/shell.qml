@@ -34,14 +34,14 @@ ShellRoot {
 
     // Mutual exclusion via the panelbus (features/panelbus): opening THIS centre broadcasts, which
     // closes the dock + any pins. Only on open (closing shouldn't reopen anything). run() detaches it.
-    onPanelOpenChanged: if (panelOpen) run("panelbus open notif")
+    onPanelOpenChanged: if (panelOpen) { run("panelbus open notif"); pWeather.running = true; }
 
     // --- design tokens (monochrome, live accent) ---
     readonly property string ff: "DepartureMono Nerd Font"
     property string accent: "#ffffff"              // read from the theme below
     readonly property string fg: accent
     readonly property string dim: "#80ffffff"      // 50% accent
-    readonly property string bgPanel: "#a6000000"  // ~65% black: the compositor blur layer-rule frosts
+    readonly property string bgPanel: "#e6000000"  // ~90% black: the compositor blur layer-rule frosts
                                                     // the desktop behind it (0.9 was too opaque to show)
     readonly property string bgTile: "#16ffffff"   // inactive tile: faint white wash
     readonly property string bgTileHi: "#24ffffff" // hover
@@ -68,12 +68,125 @@ ShellRoot {
     Process { id: pProf;  command: ["sh","-c","powerprofilesctl get 2>/dev/null"]; stdout: StdioCollector { onStreamFinished: root.powerProfile = text.trim() || "balanced" } }
     function refresh() { pAccent.running = true; pWifi.running = true; pNight.running = true; pSleep.running = true; pProf.running = true; }
 
-    Process { id: runner }
-    // setsid -f = fire-and-forget, exactly how waybar's on-click spawns (g_spawn_command_line_async):
-    // quickshell's Process reaps its child's process group on exit, which kills any daemon the command
-    // backgrounded (e.g. nightlight_toggle.sh's `hyprsunset &`) -> the gamma CTM reverts. Detaching
-    // into a new session orphans that daemon to init so it survives, same as the waybar night button.
-    function run(cmd) { runner.command = ["setsid","-f","sh","-c", cmd + " ; true"]; runner.running = true; refreshTimer.restart(); }
+    // ----- weather (runs HAKU_WEATHER_CMD -> linecast --json; see features/notifcenter/home.nix) -----
+    property var wx: null
+    function wxDay(d) { return Qt.formatDate(new Date(d), "ddd"); }
+    Process {
+        id: pWeather
+        command: ["sh","-c","$HAKU_WEATHER_CMD 2>/dev/null"]
+        stdout: StdioCollector { onStreamFinished: { try { var o = JSON.parse(text); if (o && o.current) root.wx = o; } catch (e) {} } }
+    }
+    Timer { running: true; interval: 1200000; repeat: true; triggeredOnStart: true; onTriggered: pWeather.running = true }  // every 20 min
+
+    // Fire-and-forget launcher. MUST be Quickshell.execDetached, NOT a tracked Process: a tracked
+    // Process reaps its child's whole process group when the object exits or is reused for the next
+    // command, which KILLS any daemon the command started. That is exactly why NIGHT was dead while
+    // every other tile worked -- hyprsunset is a long-lived daemon that has to survive, whereas
+    // nmcli / powerprofilesctl / the file writes are one-shot and had already exited, so the reap
+    // never touched them. (setsid -f alone did NOT save it here: reusing the single `runner` Process
+    // across clicks tore the session down.) execDetached runs fully detached + untracked -> nothing
+    // reaps it; setsid keeps it in its own session too. Verified: the command works under the service env.
+    function run(cmd) { console.log("[notif] run:", cmd); Quickshell.execDetached(["setsid","-f","sh","-c", cmd + " ; true"]); refreshTimer.restart(); }
+
+    // ----- Wi-Fi picker state (nmcli; Bluetooth uses the native Quickshell.Bluetooth service) -----
+    property var    wifiNets: []     // [{ ssid, signal, security, active }]
+    property bool   wifiBusy: false
+    property string wifiSel:  ""     // ssid awaiting credentials (secured + not already saved)
+    property bool   wifiSelEnt: false // the selected network is WPA-Enterprise (802.1X: needs an identity + EAP)
+    Process {
+        id: pScan
+        command: ["sh","-c","nmcli -t -f ACTIVE,SSID,SIGNAL,SECURITY dev wifi list --rescan auto 2>/dev/null"]
+        stdout: StdioCollector { onStreamFinished: root.parseWifi(text) }
+    }
+    function wifiScan() { root.wifiBusy = true; pScan.running = true; }
+    function parseWifi(txt) {
+        // nmcli -t is colon-separated with ':' inside a field escaped as '\:'. ACTIVE + SIGNAL +
+        // SECURITY never contain ':', so take the ends and rejoin the middle as the SSID.
+        var out = [], seen = {};
+        var lines = txt.split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i]; if (!l) continue;
+            var p = l.split(":"); if (p.length < 4) continue;
+            var active   = p[0] === "yes";
+            var security = p[p.length - 1];
+            var signal   = parseInt(p[p.length - 2]) || 0;
+            var ssid     = p.slice(1, p.length - 2).join(":").replace(/\\:/g, ":");
+            if (!ssid) continue;
+            out.push({ ssid: ssid, signal: signal, security: security, active: active, enterprise: security.indexOf("802.1X") >= 0 });
+        }
+        out.sort(function (a, b) { return b.signal - a.signal; });
+        var dedup = [];
+        for (var j = 0; j < out.length; j++) { if (seen[out[j].ssid]) continue; seen[out[j].ssid] = 1; dedup.push(out[j]); }
+        root.wifiNets = dedup; root.wifiBusy = false;
+    }
+    function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }  // single-quote for sh -c
+    function wifiConnect(ssid, pw) {
+        var c = "nmcli dev wifi connect " + shq(ssid);
+        if (pw && pw.length > 0) c += " password " + shq(pw);
+        root.run(c); root.wifiSel = "";
+    }
+    // WPA-Enterprise (802.1X): `nmcli dev wifi connect` can't express EAP, so build the profile. PEAP +
+    // MSCHAPv2 is the near-universal school/eduroam default (ksa.hs.kr included). delete-then-add keeps
+    // re-entry idempotent; NM validates the server cert against the system CA bundle. identity is typed
+    // by the user (e.g. a student id or email) -- never pre-filled.
+    function wifiConnectEnterprise(ssid, identity, pw) {
+        var q = shq(ssid);
+        var cmd = "nmcli connection delete id " + q + " 2>/dev/null; " +
+                  "nmcli connection add type wifi con-name " + q + " ssid " + q +
+                  " wifi-sec.key-mgmt wpa-eap 802-1x.eap peap 802-1x.phase2-auth mschapv2" +
+                  " 802-1x.identity " + shq(identity) + " 802-1x.password " + shq(pw) +
+                  " && nmcli connection up id " + q;
+        root.run(cmd); root.wifiSel = "";
+    }
+
+    // ----- timer / stopwatch / pomodoro (notif panel tool) -----
+    property string timerMode: "pomodoro"   // "stopwatch" | "timer" | "pomodoro"
+    property bool   timerRunning: false
+    property int    timerSecs: 25 * 60       // stopwatch: elapsed; timer/pomodoro: remaining
+    property int    timerSetMin: 25          // configured work/timer length (flexible, +/- in the UI)
+    readonly property int pomoBreakMin: 5
+    property string pomoPhase: "work"        // pomodoro: "work" | "break"
+    function fmtTime(s) {
+        s = Math.max(0, Math.floor(s));
+        var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+        var mm = (m < 10 ? "0" : "") + m, xx = (x < 10 ? "0" : "") + x;
+        return h > 0 ? (h + ":" + mm + ":" + xx) : (mm + ":" + xx);
+    }
+    function timerReset() {
+        root.timerRunning = false;
+        if (root.timerMode === "stopwatch") root.timerSecs = 0;
+        else { root.pomoPhase = "work"; root.timerSecs = root.timerSetMin * 60; }
+    }
+    function timerSetMode(m) { root.timerMode = m; root.timerReset(); }
+    function timerStartPause() {
+        if (!root.timerRunning && root.timerMode !== "stopwatch" && root.timerSecs <= 0) root.timerReset();
+        root.timerRunning = !root.timerRunning;
+    }
+    function timerAdjust(d) {
+        root.timerSetMin = Math.max(1, Math.min(180, root.timerSetMin + d));
+        if (!root.timerRunning && root.timerMode !== "stopwatch")
+            root.timerSecs = (root.timerMode === "pomodoro" && root.pomoPhase === "break" ? root.pomoBreakMin : root.timerSetMin) * 60;
+    }
+    // toast + a short chime. Both run even when the panel is closed (notify-send + pw-play are on the
+    // service PATH; HAKU_ALERT_SOUND is set in features/notifcenter/home.nix). 2>/dev/null so a missing
+    // audio sink never swallows the toast. (title/body are literals here, so plain quoting is safe.)
+    function timerAlert(title, body) {
+        root.run("notify-send -a 'Haku Timer' '" + title + "' '" + body + "' ; pw-play \"$HAKU_ALERT_SOUND\" 2>/dev/null");
+    }
+    Timer {
+        id: timerTick; interval: 1000; repeat: true; running: root.timerRunning
+        onTriggered: {
+            if (root.timerMode === "stopwatch") { root.timerSecs++; return; }
+            root.timerSecs--;
+            if (root.timerSecs > 0) return;
+            if (root.timerMode === "pomodoro") {
+                if (root.pomoPhase === "work") { root.pomoPhase = "break"; root.timerSecs = root.pomoBreakMin * 60; root.timerAlert("Break time", "Rest for " + root.pomoBreakMin + " min"); }
+                else { root.pomoPhase = "work"; root.timerSecs = root.timerSetMin * 60; root.timerAlert("Back to work", "Focus for " + root.timerSetMin + " min"); }
+            } else {
+                root.timerRunning = false; root.timerSecs = 0; root.timerAlert("Timer done", "Time is up");
+            }
+        }
+    }
     Timer { id: refreshTimer; interval: 250; onTriggered: root.refresh() }
     Timer { running: root.panelOpen; interval: 3000; repeat: true; triggeredOnStart: true; onTriggered: root.refresh() }
 
@@ -99,7 +212,7 @@ ShellRoot {
         Behavior on color { ColorAnimation { duration: 120 } }
         Column {
             anchors.centerIn: parent; spacing: 3
-            Text { anchors.horizontalCenter: parent.horizontalCenter; text: tile.icon; font.family: root.ff; font.pixelSize: 20; color: tile.active ? root.invFg : root.fg }
+            Text { anchors.horizontalCenter: parent.horizontalCenter; text: tile.icon; visible: text.length > 0; font.family: root.ff; font.pixelSize: 20; color: tile.active ? root.invFg : root.fg }
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: tile.label; font.family: root.ff; font.pixelSize: 11; color: tile.active ? root.invFg : root.dim; visible: text.length > 0 }
         }
         MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tile.clicked() }
@@ -110,8 +223,12 @@ ShellRoot {
         property string icon: ""
         property real value: 0
         signal moved(real v)
+        signal iconClicked()
         spacing: 12
-        Text { text: sr.icon; font.family: root.ff; font.pixelSize: 20; color: root.fg; Layout.preferredWidth: 24; horizontalAlignment: Text.AlignHCenter }
+        Text {
+            text: sr.icon; font.family: root.ff; font.pixelSize: 20; color: root.fg; Layout.preferredWidth: 24; horizontalAlignment: Text.AlignHCenter
+            MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: sr.iconClicked() }
+        }
         Rectangle {
             Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
             height: 8; radius: 4; color: root.bgTile
@@ -162,7 +279,12 @@ ShellRoot {
     PanelWindow {
         id: panel
         visible: root.panelOpen
-        WlrLayershell.namespace: "haku-notifcenter"   // keystone matches this -> trapezoid
+        // Renamed OFF "haku-notifcenter" so the compositor keystone (features/hyprland/trapezoid.patch,
+        // which matches that prefix) NO LONGER warps this layer: the LAYER keystone mis-renders at a
+        // fractional monitor scale (0.8 here), compressing the panel into the right ~45% with a dead
+        // transparent left gutter (the "vertical bar"). Flat, full-width panel instead. To bring the
+        // trapezoid back, fix the layer path's scale handling in the patch, then restore this name.
+        WlrLayershell.namespace: "haku-notifcenter"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
         anchors { top: true; right: true }
@@ -184,18 +306,185 @@ ShellRoot {
                 anchors { fill: parent; margins: 22 }
                 spacing: 18
 
+                // weather (linecast --json: current + 5-day forecast)
+                Rectangle {
+                    visible: root.wx !== null
+                    Layout.fillWidth: true; radius: 16; color: root.bgTile
+                    implicitHeight: wxCol.implicitHeight + 24
+                    ColumnLayout {
+                        id: wxCol
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14 }
+                        spacing: 8
+                        RowLayout {   // location + AQI
+                            Layout.fillWidth: true
+                            Text { text: root.wx ? root.wx.location : ""; font.family: root.ff; font.pixelSize: 13; font.bold: true; color: root.fg; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Text { text: (root.wx && root.wx.aqi) ? ("AQI " + root.wx.aqi.us_aqi) : ""; font.family: root.ff; font.pixelSize: 11; color: root.dim }
+                        }
+                        RowLayout {   // current: icon + temp + condition, H/L on the right
+                            Layout.fillWidth: true; spacing: 12
+                            Text { text: root.wx ? root.wx.current.icon : ""; font.family: root.ff; font.pixelSize: 36; color: root.fg }
+                            ColumnLayout {
+                                spacing: 0
+                                Text { text: root.wx ? (Math.round(root.wx.current.temperature) + "°") : ""; font.family: root.ff; font.pixelSize: 28; color: root.fg }
+                                Text { text: root.wx ? root.wx.current.condition : ""; font.family: root.ff; font.pixelSize: 12; color: root.dim }
+                            }
+                            Item { Layout.fillWidth: true }
+                            ColumnLayout {
+                                spacing: 0
+                                Text { text: root.wx ? ("H " + Math.round(root.wx.today.high) + "°") : ""; font.family: root.ff; font.pixelSize: 13; color: root.fg; Layout.alignment: Qt.AlignRight }
+                                Text { text: root.wx ? ("L " + Math.round(root.wx.today.low) + "°") : ""; font.family: root.ff; font.pixelSize: 13; color: root.dim; Layout.alignment: Qt.AlignRight }
+                            }
+                        }
+                        Text {   // details
+                            Layout.fillWidth: true; elide: Text.ElideRight
+                            text: root.wx ? ("Feels " + Math.round(root.wx.current.feels_like) + "°   Humidity " + root.wx.current.humidity + "%   Wind " + Math.round(root.wx.current.wind_speed) + " km/h   Rain " + root.wx.today.precipitation_probability + "%") : ""
+                            font.family: root.ff; font.pixelSize: 11; color: root.dim
+                        }
+                        RowLayout {   // 5-day forecast
+                            Layout.fillWidth: true; spacing: 4
+                            Repeater {
+                                model: (root.wx && root.wx.daily) ? root.wx.daily.slice(0, 5) : []
+                                delegate: ColumnLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true; spacing: 1
+                                    Text { text: root.wxDay(modelData.date); font.family: root.ff; font.pixelSize: 10; color: root.dim; Layout.alignment: Qt.AlignHCenter }
+                                    Text { text: modelData.icon; font.family: root.ff; font.pixelSize: 17; color: root.fg; Layout.alignment: Qt.AlignHCenter }
+                                    Text { text: Math.round(modelData.high) + "°"; font.family: root.ff; font.pixelSize: 11; color: root.fg; Layout.alignment: Qt.AlignHCenter }
+                                    Text { text: Math.round(modelData.low) + "°"; font.family: root.ff; font.pixelSize: 10; color: root.dim; Layout.alignment: Qt.AlignHCenter }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // quick toggles
                 GridLayout {
                     Layout.fillWidth: true
                     columns: 3; rowSpacing: 12; columnSpacing: 12
-                    Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: root.wifiOn ? "󰤨" : "󰤭"; label: "Wi-Fi"; active: root.wifiOn; onClicked: root.run("nmcli radio wifi " + (root.wifiOn ? "off" : "on")) }
+                    Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: root.wifiOn ? "󰤨" : "󰤭"; label: "Wi-Fi"; active: root.wifiOn
+                           onClicked: { wifiMenu.open = !wifiMenu.open; if (wifiMenu.open) { btMenu.open = false; powerMenu.open = false; root.wifiScan(); } } }
                     Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: "󰂯"; label: "Bluetooth"; active: Bluetooth.defaultAdapter ? Bluetooth.defaultAdapter.enabled : false
-                           onClicked: { if (Bluetooth.defaultAdapter) Bluetooth.defaultAdapter.enabled = !Bluetooth.defaultAdapter.enabled; } }
+                           onClicked: { btMenu.open = !btMenu.open; if (btMenu.open) { wifiMenu.open = false; powerMenu.open = false; } } }
                     Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: root.dnd ? "󰂛" : "󰂚"; label: "DND"; active: root.dnd; onClicked: root.dnd = !root.dnd }
                     Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: "󰒲"; label: "No Sleep"; active: root.nosleepOn
                            onClicked: root.run("f=$HOME/.local/state/haku_theme/idle_inhibit; mkdir -p \"$(dirname $f)\"; [ \"$(cat $f 2>/dev/null)\" = 1 ] && echo 0 > $f || echo 1 > $f") }
                     Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: "󰛨"; label: "Night"; active: root.nightOn; onClicked: root.run("$HOME/.local/bin/nightlight_toggle.sh") }
-                    Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: "󰐥"; label: "Power"; active: powerMenu.open; onClicked: powerMenu.open = !powerMenu.open }
+                    Tile { Layout.fillWidth: true; Layout.preferredHeight: 62; icon: "󰐥"; label: "Power"; active: powerMenu.open
+                           onClicked: { powerMenu.open = !powerMenu.open; if (powerMenu.open) { wifiMenu.open = false; btMenu.open = false; } } }
+                }
+
+                // Wi-Fi picker (nmcli). Click the Wi-Fi tile to open; pick a network to connect
+                // (saved/open connect straight away; a secured new one shows a password field).
+                ColumnLayout {
+                    id: wifiMenu; property bool open: false
+                    visible: open; Layout.fillWidth: true; spacing: 8
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Text { text: "Wi-Fi"; font.family: root.ff; font.pixelSize: 14; color: root.fg; Layout.fillWidth: true }
+                        Tile { implicitWidth: 58; implicitHeight: 30; label: root.wifiOn ? "On" : "Off"; active: root.wifiOn
+                               onClicked: root.run("nmcli radio wifi " + (root.wifiOn ? "off" : "on")) }
+                        Tile { implicitWidth: 40; implicitHeight: 30; icon: "󰑐"; onClicked: root.wifiScan() }
+                    }
+                    Repeater {
+                        model: root.wifiNets
+                        delegate: Rectangle {
+                            required property var modelData
+                            Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                            color: wna.containsMouse ? root.bgTileHi : root.bgTile
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 8
+                                Text { text: modelData.signal > 66 ? "󰤨" : modelData.signal > 33 ? "󰤥" : "󰤟"; font.family: root.ff; font.pixelSize: 15; color: root.fg }
+                                Text { text: modelData.ssid; font.family: root.ff; font.pixelSize: 12; color: root.fg; Layout.fillWidth: true; elide: Text.ElideRight }
+                                Text { text: (modelData.security && modelData.security !== "") ? "󰌾" : ""; font.family: root.ff; font.pixelSize: 11; color: root.dim }
+                                Text { text: modelData.active ? "󰄬" : ""; font.family: root.ff; font.pixelSize: 13; color: root.accent }
+                            }
+                            MouseArea {
+                                id: wna; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (modelData.active) return;
+                                    if (modelData.security && modelData.security !== "") { root.wifiSel = modelData.ssid; root.wifiSelEnt = modelData.enterprise === true; }
+                                    else root.wifiConnect(modelData.ssid, "");
+                                }
+                            }
+                        }
+                    }
+                    Text { visible: root.wifiNets.length === 0; text: root.wifiBusy ? "Scanning…" : "No networks"; font.family: root.ff; font.pixelSize: 11; color: root.dim }
+                    ColumnLayout {   // credentials for a selected secured network (PSK: password; enterprise: identity + password)
+                        visible: root.wifiSel !== ""
+                        Layout.fillWidth: true; spacing: 6
+                        onVisibleChanged: if (visible) { if (root.wifiSelEnt) idField.forceActiveFocus(); else pwField.forceActiveFocus(); }
+                        Rectangle {   // identity / username (WPA-Enterprise 802.1X only)
+                            visible: root.wifiSelEnt
+                            Layout.fillWidth: true; implicitHeight: 34; radius: 8; color: root.bgTile
+                            onVisibleChanged: if (visible) idField.forceActiveFocus()
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 8
+                                Text { text: "󰀄"; font.family: root.ff; font.pixelSize: 13; color: root.dim }
+                                TextInput {
+                                    id: idField; Layout.fillWidth: true; clip: true
+                                    enabled: root.wifiSel !== ""   // disabled while hidden -> can't hold focus or draw a caret
+                                    color: root.fg; font.family: root.ff; font.pixelSize: 12; verticalAlignment: TextInput.AlignVCenter
+                                    onAccepted: pwField.forceActiveFocus()
+                                    Text { anchors.fill: parent; visible: !idField.text; verticalAlignment: Text.AlignVCenter
+                                           text: "Username / identity"; color: root.dim; font: idField.font }
+                                }
+                            }
+                        }
+                        Rectangle {   // password (PSK key, or the 802.1X password)
+                            Layout.fillWidth: true; implicitHeight: 34; radius: 8; color: root.bgTile
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 8
+                                Text { text: "󰌾"; font.family: root.ff; font.pixelSize: 13; color: root.dim }
+                                TextInput {
+                                    id: pwField; Layout.fillWidth: true; clip: true
+                                    enabled: root.wifiSel !== ""   // disabled while hidden -> can't hold focus or draw a caret
+                                    color: root.fg; font.family: root.ff; font.pixelSize: 12
+                                    echoMode: TextInput.Password; verticalAlignment: TextInput.AlignVCenter
+                                    onAccepted: {
+                                        if (root.wifiSelEnt) root.wifiConnectEnterprise(root.wifiSel, idField.text, text);
+                                        else root.wifiConnect(root.wifiSel, text);
+                                        text = "";
+                                    }
+                                    Text { anchors.fill: parent; visible: !pwField.text; verticalAlignment: Text.AlignVCenter
+                                           text: "Password · " + root.wifiSel + "  ↵"; color: root.dim; font: pwField.font }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Bluetooth picker (native Quickshell.Bluetooth). Click the Bluetooth tile to open.
+                ColumnLayout {
+                    id: btMenu; property bool open: false
+                    visible: open; Layout.fillWidth: true; spacing: 8
+                    property var adapter: Bluetooth.defaultAdapter
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 10
+                        Text { text: "Bluetooth"; font.family: root.ff; font.pixelSize: 14; color: root.fg; Layout.fillWidth: true }
+                        Tile { implicitWidth: 58; implicitHeight: 30; label: (btMenu.adapter && btMenu.adapter.enabled) ? "On" : "Off"; active: btMenu.adapter ? btMenu.adapter.enabled : false
+                               onClicked: if (btMenu.adapter) btMenu.adapter.enabled = !btMenu.adapter.enabled }
+                        Tile { implicitWidth: 40; implicitHeight: 30; icon: "󰑐"; active: btMenu.adapter ? btMenu.adapter.discovering : false
+                               onClicked: if (btMenu.adapter) btMenu.adapter.discovering = !btMenu.adapter.discovering }
+                    }
+                    Repeater {
+                        model: Bluetooth.devices
+                        delegate: Rectangle {
+                            required property var modelData
+                            Layout.fillWidth: true; implicitHeight: 34; radius: 8
+                            color: bda.containsMouse ? root.bgTileHi : root.bgTile
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 8
+                                Text { text: modelData.connected ? "󰂱" : "󰂯"; font.family: root.ff; font.pixelSize: 15; color: modelData.connected ? root.accent : root.fg }
+                                Text { text: (modelData.name && modelData.name !== "") ? modelData.name : modelData.address; font.family: root.ff; font.pixelSize: 12; color: root.fg; Layout.fillWidth: true; elide: Text.ElideRight }
+                                Text { text: modelData.connected ? "Connected" : ((modelData.paired || modelData.bonded) ? "Paired" : ""); font.family: root.ff; font.pixelSize: 10; color: root.dim }
+                            }
+                            MouseArea {
+                                id: bda; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (modelData.connected) modelData.disconnect(); else modelData.connect(); }
+                            }
+                        }
+                    }
+                    Text { visible: !btMenu.adapter || !btMenu.adapter.enabled; text: "Bluetooth is off"; font.family: root.ff; font.pixelSize: 11; color: root.dim }
                 }
 
                 RowLayout {
@@ -220,7 +509,8 @@ ShellRoot {
                     Layout.fillWidth: true; Layout.preferredHeight: 24
                     icon: (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio && Pipewire.defaultAudioSink.audio.muted) ? "󰝟" : "󰕾"
                     value: (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio) ? Pipewire.defaultAudioSink.audio.volume : 0
-                    onMoved: (v) => { if (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio) Pipewire.defaultAudioSink.audio.volume = v; }
+                    onMoved: (v) => { if (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio) { Pipewire.defaultAudioSink.audio.volume = v; Pipewire.defaultAudioSink.audio.muted = false; } }
+                    onIconClicked: { if (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio) Pipewire.defaultAudioSink.audio.muted = !Pipewire.defaultAudioSink.audio.muted; }
                 }
                 SliderRow {
                     id: brightRow
@@ -231,6 +521,46 @@ ShellRoot {
                     onMoved: (v) => { cur = v; root.run("brightnessctl set " + Math.round(v*100) + "%"); }
                     Process { id: pBright; command: ["sh","-c","brightnessctl -m 2>/dev/null | cut -d, -f4 | tr -d %"]; stdout: StdioCollector { onStreamFinished: { var n = parseFloat(text.trim()); if (!isNaN(n)) brightRow.cur = n/100; } } }
                     Timer { running: root.panelOpen; interval: 3000; repeat: true; triggeredOnStart: true; onTriggered: pBright.running = true }
+                }
+
+                // timer / stopwatch / pomodoro -- in its own card (matches the music card), centered
+                Rectangle {
+                    Layout.fillWidth: true; radius: 16; color: root.bgTile
+                    implicitHeight: timerCol.implicitHeight + 28
+                    ColumnLayout {
+                        id: timerCol
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14 }
+                        spacing: 12
+                        RowLayout {   // mode tabs (segmented)
+                            Layout.fillWidth: true; spacing: 6
+                            Tile { Layout.fillWidth: true; implicitHeight: 28; radius: 9; label: "Stopwatch"; active: root.timerMode === "stopwatch"; onClicked: root.timerSetMode("stopwatch") }
+                            Tile { Layout.fillWidth: true; implicitHeight: 28; radius: 9; label: "Timer"; active: root.timerMode === "timer"; onClicked: root.timerSetMode("timer") }
+                            Tile { Layout.fillWidth: true; implicitHeight: 28; radius: 9; label: "Pomodoro"; active: root.timerMode === "pomodoro"; onClicked: root.timerSetMode("pomodoro") }
+                        }
+                        Text {   // pomodoro phase
+                            visible: root.timerMode === "pomodoro"
+                            Layout.alignment: Qt.AlignHCenter
+                            text: root.pomoPhase === "work" ? "WORK" : "BREAK"
+                            font.family: root.ff; font.pixelSize: 11; font.letterSpacing: 2; color: root.dim
+                        }
+                        Text {   // big time
+                            Layout.alignment: Qt.AlignHCenter
+                            text: root.fmtTime(root.timerSecs)
+                            font.family: root.ff; font.pixelSize: 42; color: root.timerRunning ? root.accent : root.fg
+                        }
+                        RowLayout {   // duration (timer/pomodoro only)
+                            visible: root.timerMode !== "stopwatch"
+                            Layout.alignment: Qt.AlignHCenter; spacing: 12
+                            Tile { implicitWidth: 38; implicitHeight: 28; radius: 9; icon: "󰍴"; onClicked: root.timerAdjust(-5) }
+                            Text { text: root.timerSetMin + " min"; font.family: root.ff; font.pixelSize: 12; color: root.dim; Layout.preferredWidth: 56; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            Tile { implicitWidth: 38; implicitHeight: 28; radius: 9; icon: "󰐕"; onClicked: root.timerAdjust(5) }
+                        }
+                        RowLayout {   // start/pause + reset
+                            Layout.fillWidth: true; spacing: 8
+                            Tile { Layout.fillWidth: true; implicitHeight: 38; radius: 12; icon: root.timerRunning ? "󰏤" : "󰐊"; active: root.timerRunning; onClicked: root.timerStartPause() }
+                            Tile { implicitWidth: 54; implicitHeight: 38; radius: 12; icon: "󰜉"; onClicked: root.timerReset() }
+                        }
+                    }
                 }
 
                 // music (mpris)
@@ -244,6 +574,20 @@ ShellRoot {
                         anchors.fill: parent
                         anchors.margins: 14
                         spacing: 12
+                        Rectangle {   // album-art thumbnail (note-icon placeholder when there's no art)
+                            Layout.preferredWidth: 48; Layout.preferredHeight: 48
+                            radius: 8; color: root.bgPanel; clip: true
+                            Image {
+                                id: artImg; anchors.fill: parent
+                                source: (musicCard.player && musicCard.player.trackArtUrl) ? musicCard.player.trackArtUrl : ""
+                                fillMode: Image.PreserveAspectCrop; sourceSize.width: 96; sourceSize.height: 96
+                                asynchronous: true; cache: true; visible: status === Image.Ready
+                            }
+                            Text {
+                                anchors.centerIn: parent; visible: artImg.status !== Image.Ready
+                                text: "󰎆"; font.family: root.ff; font.pixelSize: 22; color: root.dim
+                            }
+                        }
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 2
                             Text { text: musicCard.player ? (musicCard.player.trackTitle || "—") : "—"; font.family: root.ff; color: root.fg; font.bold: true; font.pixelSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }

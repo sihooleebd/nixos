@@ -100,7 +100,7 @@ ensure_float() { [ "$(isfloat "$1")" = "false" ] && d "hl.dsp.window.float({wind
 # fanned+dimmed), raises deepest->front so the front lands on top, then focuses
 # the front. All placement is by address; only the final focus touches focus.
 render() {
-  local front="$1" stagger="${2:-0}" i d dd x y cw ch cx cy op ov scp
+  local front="$1" stagger="${2:-0}" nofocus="${3:-0}" i d dd x y cw ch cx cy op ov scp tg tgwant
   local -a ord rot MX MY
   mapfile -t ord < <(order)
   [ ${#ord[@]} -eq 0 ] && return 1
@@ -126,6 +126,20 @@ render() {
     y=$(( CY0 - ch/2 ))                                         # vertically CENTERED on the front midline
     MX[$i]=$x; MY[$i]=$y
     if [ "$d" -eq 0 ]; then op="1.0 1.0"; else ov=$(( 60 - (dd-1)*14 )); [ "$ov" -lt 30 ] && ov=30; op="0.$ov 0.$ov"; fi
+    # Two per-card tags the compositor (trapezoid.patch) reads, applied BEFORE the resize/move:
+    #  dockd<depth>      front=0 -> this card gets its OWN move curve overshooting by
+    #                    keystone_bounce * keystone_bounce_decay^depth (updateDockMoveAnimation).
+    #  dockbox<cw>x<ch>  this card's INTENDED box (logical px). fitTransform() uses it as the
+    #                    target box so SCALE-TO-FIT engages even when an X11/Wine client (KakaoTalk)
+    #                    resists the resize and its live size stays at its own min -> it's drawn
+    #                    shrunk into the card instead of overflowing. Wayland cards that comply have
+    #                    box == card so it's a no-op for them.
+    # Drop any STALE dockd/dockbox tags first (only those NOT in the wanted set).
+    tgwant="dockd$d dockbox${cw}x${ch}"
+    while read -r tg; do
+      [ -n "$tg" ] && [[ " $tgwant " != *" $tg "* ]] && batch+="dispatch hl.dsp.window.tag({tag=\"-$tg\", window=\"address:$a\"}) ; "
+    done < <($J -r --arg a "$a" 'first(.[]|select(.address==$a)).tags[]? | rtrimstr("*") | select(test("^dock(d[0-9]+|box[0-9]+x[0-9]+)$"))' <<<"$CLIENTS")
+    for tg in $tgwant; do batch+="dispatch hl.dsp.window.tag({tag=\"+$tg\", window=\"address:$a\"}) ; "; done
     batch+="dispatch hl.dsp.window.set_prop({prop=\"max_size\", value=\"$cw $ch\", window=\"address:$a\"}) ; "
     batch+="dispatch hl.dsp.window.set_prop({prop=\"min_size\", value=\"$cw $ch\", window=\"address:$a\"}) ; "
     batch+="dispatch hl.dsp.window.resize({x=$cw, y=$ch, window=\"address:$a\"}) ; "
@@ -139,7 +153,9 @@ render() {
   for ((i=${#rot[@]}-1; i>=0; i--)); do
     batch+="dispatch hl.dsp.window.alter_zorder({mode=\"top\", window=\"address:${rot[$i]}\"}) ; "
   done
-  batch+="dispatch hl.dsp.focus({window=\"address:${rot[0]}\"})"
+  # The final focus is SKIPPED in nofocus mode (the workspace-change 'rehome': re-home the
+  # pile to its monitor without yanking focus off the workspace you just switched to).
+  [ "$nofocus" != 1 ] && batch+="dispatch hl.dsp.focus({window=\"address:${rot[0]}\"})"
   $HC --batch "$batch" >/dev/null 2>&1
   # Staggered slide-in (show): front leads, each next card follows STAGGER later, so the
   # pile fans in with a bit of feel instead of snapping as one block. (Sizes/z were set
@@ -154,17 +170,30 @@ render() {
 }
 
 park_all() {
-  # UNPIN as part of hiding: a pinned window follows every workspace, and Hyprland
-  # pulls a pinned off-screen window back on-screen when the workspace changes -- so
-  # a hidden-but-pinned dock would "reopen" on the next workspace switch. Unpinned +
-  # parked, it stays put and out of sight; render() re-pins on show.
-  # Park BACK-to-FRONT with a small stagger so the pile ripples out instead of leaving as
-  # one block (matches the staggered slide-IN on show). order() is front..back, so reverse.
-  local -a o; mapfile -t o < <(order)
-  local a i
-  for ((i=${#o[@]}-1; i>=0; i--)); do a="${o[$i]}"; [ -n "$a" ] || continue
-    ensure_float "$a"; pin "$a" off; mv "$a" "$PARKED_X" "$DOCK_Y"
-    if [ "$i" -gt 0 ]; then sleep "$STAGGER" 2>/dev/null; fi
+  # UNPIN as part of hiding: a pinned window follows every workspace, and Hyprland pulls a
+  # pinned off-screen window back on-screen when the workspace changes -- so a hidden-but-
+  # pinned dock would "reopen" on the next workspace switch. Unpinned + parked it stays put;
+  # render() re-pins on show.
+  local -a o rot; mapfile -t o < <(order)
+  [ ${#o[@]} -eq 0 ] && return 0
+  # Depth order (front first): order() is ADDRESS-sorted, NOT depth-sorted, so rotate it
+  # around the current front to recover the on-screen stacking before touching z.
+  local cur fi=0 i a; cur="$(curfront)"; { [ -z "$cur" ] || ! exists "$cur"; } && cur="${o[0]}"
+  for i in "${!o[@]}"; do [ "${o[$i]}" = "$cur" ] && fi=$i && break; done
+  for ((i=0; i<${#o[@]}; i++)); do rot+=("${o[$(( (fi+i) % ${#o[@]} ))]}"); done
+  # Z-ORDER FIX (close mixup): unpinning a pinned window re-inserts it into the workspace
+  # stack, and doing the unpins one-at-a-time with the stagger sleeps flashed each card to
+  # the TOP as it was released -- cards popping over each other on close. So unpin them ALL
+  # in one atomic frame, then raise deepest->front (front on top) in the SAME batch, so the
+  # pile stays correctly stacked. The slide-out below only MOVES (never reorders), so z holds.
+  local batch=""
+  for a in "${rot[@]}"; do ensure_float "$a"; batch+="dispatch hl.dsp.window.pin({action=\"off\", window=\"address:$a\"}) ; "; done
+  for ((i=${#rot[@]}-1; i>=0; i--)); do batch+="dispatch hl.dsp.window.alter_zorder({mode=\"top\", window=\"address:${rot[$i]}\"}) ; "; done
+  $HC --batch "$batch" >/dev/null 2>&1
+  # Slide out BACK-to-FRONT with a small stagger so the pile ripples out (matches slide-IN).
+  for ((i=${#rot[@]}-1; i>=0; i--)); do
+    mv "${rot[$i]}" "$PARKED_X" "$DOCK_Y"
+    [ "$i" -gt 0 ] && sleep "$STAGGER" 2>/dev/null
   done
 }
 # Show the pile at the remembered front (falling back to the first window).
@@ -315,22 +344,33 @@ case "${1:-toggle}" in
     for i in "${!ORD[@]}"; do [ "${ORD[$i]}" = "$cur" ] && ci=$i && break; done
     if [ "$1" = "next" ]; then ni=$(( (ci+1) % ${#ORD[@]} )); else ni=$(( (ci-1+${#ORD[@]}) % ${#ORD[@]} )); fi
     render "${ORD[$ni]}" ;;
-  gesture-move)  # 4-finger drag ($2 = l/r/u/d, the dominant axis). Focused ON a dock card ->
-                 # SHIFT the pile (l=prev, r=next, same as SUPER+left/right); anywhere else ->
-                 # move the focused window like the old 4-finger "move" gesture (dwindle swap).
-    a="$(active)"; [ -z "$a" ] && exit 0
-    if is_dock "$a" && ! is_pip "$a"; then   # a PiP carries `dock` but isn't in the pile -> move it, don't shift
-      [ "$(shownany)" = "true" ] || exit 0
-      mapfile -t ORD < <(order); [ ${#ORD[@]} -le 1 ] && exit 0
-      cur="$(curfront)"; ci=0
-      for i in "${!ORD[@]}"; do [ "${ORD[$i]}" = "$cur" ] && ci=$i && break; done
-      case "${2:-}" in
-        r) render "${ORD[$(( (ci+1) % ${#ORD[@]} ))]}" ;;
-        l) render "${ORD[$(( (ci-1+${#ORD[@]}) % ${#ORD[@]} ))]}" ;;
-      esac   # vertical on a dock card: ignored
-    else
-      case "${2:-}" in l|r|u|d) $HC dispatch movewindow "$2" ;; esac
-    fi ;;
+  gesture-move)  # gestures:dock_swipe_exec (trapezoid.patch): RELEASE of the continuous 4-finger move
+                 # gesture after it began on a pile card. The compositor already slid the card LIVE
+                 # under the finger; it hands $2 = l/r/none (finger direction; none = too short to
+                 # cycle) and $3 = the front card's address at swipe start. EITHER direction (left OR
+                 # right) sinks the front card to the bottom and moves the rest up one -- Benjamin
+                 # wants any 4-finger swipe on the pile to cycle the same way; none springs back.
+                 # render() animates from where the finger left the card. A 4-finger drag NOT on a
+                 # pile card is moved by the compositor (normal window move) and never reaches here.
+    mapfile -t ORD < <(order); [ ${#ORD[@]} -eq 0 ] && exit 0
+    cur="${3:-}"; { [ -n "$cur" ] && exists "$cur"; } || cur="$(curfront)"
+    [ -z "$cur" ] && cur="${ORD[0]}"
+    ci=0; for i in "${!ORD[@]}"; do [ "${ORD[$i]}" = "$cur" ] && ci=$i && break; done
+    case "${2:-}" in
+      l|r|next|prev) render "${ORD[$(( (ci+1) % ${#ORD[@]} ))]}" ;;  # EITHER direction: sink the front to the bottom, the rest move up one
+      *) render "$cur" ;;                                            # too short / none: spring back, no cycle
+    esac ;;
+  gesture-pile)  # gestures:dock_pile_exec (trapezoid.patch): RELEASE of the continuous 3-finger pile
+                 # show/hide. CDockPileTrackpadGesture already slid EVERY pile card live; it hands
+                 # $2 = l|r|none (l = reveal, r = hide, none = too short -> spring back) and $3 = 1 if
+                 # the pile was shown at swipe start else 0. show_pile / park_all animate the pile from
+                 # wherever the fingers left it. (The 3-finger VERTICAL swipe is the workspace switch,
+                 # a different axis, so the two never collide.)
+    case "${2:-}" in
+      l) show_pile ;;
+      r) cur="$(curfront)"; [ -n "$cur" ] && printf '%s' "$cur" >"$STATE"; park_all ;;
+      *) if [ "${3:-0}" = "1" ]; then show_pile; else park_all; fi ;;
+    esac ;;
   dock-toggle)   # SUPER+SHIFT+D: toggle the focused window's DOCK membership. pin and dock are
                  # mutually exclusive: a PiP (pin) folds into the pile (clearing the pin); a pile
                  # window undocks; a normal window docks. Check pip FIRST -- a PiP also carries the
@@ -375,4 +415,18 @@ case "${1:-toggle}" in
     else
       park_all
     fi ;;
+  rehome)  # a workspace became active (hl.on workspace.active, features/sidedock). The pile is
+           # PINNED, and Hyprland's pin follows the active workspace across ALL monitors -- so
+           # switching a workspace on ANOTHER screen drags the dock off its home monitor ("flies
+           # across screens"). If the pile is up and has drifted onto the wrong monitor, re-home it
+           # by re-rendering on the rightmost monitor (geom() always targets it) -- in NOFOCUS mode
+           # so it does NOT yank focus off the workspace you just switched to. No-op when the dock
+           # is hidden or already on its home monitor (so a home-monitor switch, which pin handles
+           # correctly, does nothing here).
+    [ "$(shownany)" = "true" ] || exit 0
+    cur="$(curfront)"; { [ -z "$cur" ] || ! exists "$cur"; } && exit 0
+    homeid=$($HC monitors -j | $J -r 'max_by(.x + (.width/(.scale//1))).id')
+    curmon=$($J -r --arg a "$cur" 'first(.[]|select(.address==$a)).monitor' <<<"$CLIENTS")
+    [ "$curmon" = "$homeid" ] && exit 0   # already home -> leave it (pin kept it correct)
+    render "$cur" 0 1 ;;                   # re-home to the rightmost monitor, no focus steal
 esac

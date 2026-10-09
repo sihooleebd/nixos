@@ -27,6 +27,39 @@ let
     [ -n "$cur" ] && [ -f "$cur" ] && awww img "$cur" --transition-type none >/dev/null 2>&1 || true
   '';
 
+  # Wine/KakaoTalk "폴더 열기" (open/reveal folder) spawns `explorer.exe /select,<winpath>` DIRECTLY
+  # -- it bypasses the Directory shell association (Wine's shell32 hardcodes explorer.exe for folders),
+  # so a registry redirect can't catch it (verified live: cmdline was
+  # `explorer.exe /select,Z:\home\benjamin\Downloads\CALC2_MID.pdf`). So catch the explorer.exe WINDOW
+  # on open (hl.on below), pull the path from /proc/<pid>/cmdline, convert the Wine path to Unix via the
+  # prefix's dosdevices symlinks (Z: -> /, C: -> drive_c, ...), CLOSE the Wine window, and reveal the
+  # file in the NATIVE file manager (dolphin --select; xdg-open the dir as fallback). Guards: skip the
+  # `/desktop` shell explorer and any explorer.exe with no path arg (e.g. the tray), so only real folder
+  # windows are redirected.
+  folderToDolphin = pkgs.writeShellScript "wine-folder-to-dolphin" ''
+    export PATH=${lib.makeBinPath [ osConfig.programs.hyprland.package pkgs.jq pkgs.coreutils pkgs.gnused pkgs.kdePackages.dolphin pkgs.xdg-utils ]}''${PATH:+:$PATH}
+    PFX="$HOME/.local/share/wineprefixes/kakaotalk"
+    addr="$1"
+    pid=$(hyprctl clients -j | jq -r --arg a "$addr" 'first(.[]|select(.address==$a)).pid // empty')
+    [ -n "$pid" ] || exit 0
+    cl=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    case "$cl" in *desktop*) exit 0 ;; esac            # the Wine desktop shell -- never touch it
+    case "$cl" in *explorer.exe*) : ;; *) exit 0 ;; esac
+    arg="''${cl#*explorer.exe }"                         # strip up to "explorer.exe "
+    arg="''${arg#/select,}"                              # drop the /select, prefix if present
+    arg="$(printf '%s' "$arg" | sed 's/[[:space:]]*$//')"
+    [ -n "$arg" ] || exit 0                             # no path (tray / bare shell) -> leave it
+    drive="$(printf '%s' "$arg" | cut -c1 | tr '[:upper:]' '[:lower:]')"
+    rest="$(printf '%s' "''${arg#?:}" | tr '\\' '/')"   # "\a\b" -> "/a/b"
+    base="$(readlink -f "$PFX/dosdevices/$drive:" 2>/dev/null)"
+    [ -n "$base" ] || exit 0
+    u="$(readlink -m "$base/$rest" 2>/dev/null)"
+    [ -n "$u" ] || exit 0
+    hyprctl dispatch "hl.dsp.window.close({window=\"address:$addr\"})" >/dev/null 2>&1
+    if [ -e "$u" ]; then setsid dolphin --select "$u" >/dev/null 2>&1 &
+    else d="$(dirname "$u")"; [ -d "$d" ] && setsid xdg-open "$d" >/dev/null 2>&1 & fi
+  '';
+
   # NOTE: per-monitor workspace management (pin/rename/evacuate) AND runtime monitor-scale capture
   # moved to features/hyprland (their proper domain -- it now owns a monitor.layout_changed hook of
   # its own; hl.on stacks and reload clears handlers, so it coexists with the dock hook below). This
@@ -63,6 +96,14 @@ let
   # warps, so the frost follows the trapezoid too. That's what makes a docked glass window
   # read as GLASS (background frosted/unreadable) rather than plain see-through. (Keep the
   # window non-`opaque`: shouldBlur() disables blur for opaque/no_blur/RGBX -- Renderer.cpp.)
+  # NB: do NOT add suppress_event = "activate" here. It maps to SUPPRESS_ACTIVATE (Window.cpp),
+  # which the aim was to stop an XWayland/Wine back-of-pile card (KakaoTalk) self-raising to the
+  # FRONT and desyncing the cascade -- BUT SUPPRESS_ACTIVATE also blocks the window's OWN raise
+  # when it restores from the system tray, so KakaoTalk's window never appeared ("doesn't work",
+  # 2026-10-08). The dock already re-asserts z-order (deepest->front) on every render, so a
+  # spontaneous self-raise (e.g. an incoming message) is a transient the next dock interaction
+  # corrects -- a far smaller cost than the app being unopenable. (If it ever gets annoying, add a
+  # window-activate HOOK that re-runs the dock z-order for dock windows -- never a blanket suppress.)
   routeRules = lib.concatMapStringsSep "\n      " (c:
     ''hl.window_rule({ match = { class = "^(${c})$" }, float = true, size = "33% 88%", move = "66% 8%", opacity = "1.0 1.0", pin = true, border_size = 0, rounding = 0, no_initial_focus = true })''
   ) (cfg.apps ++ [ dockTermClass ]);
@@ -107,59 +148,16 @@ lib.mkIf (osConfig.my.sidedock.enable && inScope && osConfig.my.desktop.composit
       -- while you take notes. Press again on it to drop it back into the tiling layout. (U = a
       -- verified-free key; P/SHIFT+P/ALT+P were play-pause/dpms/pin and V is DMS's clipboard.)
       hl.bind("${mod} + U", hl.dsp.exec_cmd("${dock} pip-toggle"))
-      -- 3-finger HORIZONTAL swipe shows/hides the dock: swipe LEFT reveals the pile
-      -- (pulled in from the right edge), swipe RIGHT hides it. A Lua-function gesture
-      -- (start/update/finish) because the direction picks the verb: accumulate the net
-      -- horizontal delta across the swipe and decide on release -- robust whether e.delta
-      -- is per-frame or cumulative (the sign of the sum is the dominant direction either
-      -- way). The 3-finger VERTICAL workspace swipe is a different axis, so no clash; this
-      -- replaced the inert scroll_move gesture (see features/hyprland gesture list). Flip
-      -- the `acc < 0` test if the direction feels reversed on the touchpad.
-      -- pcall-guarded: this table-action gesture form is only exercised at config load
-      -- (relogin), and a bad hl.* call there can blank the whole session (see the Lua
-      -- config blackout note). If the API shape is off, the gesture just fails to register
-      -- instead of killing the session.
-      do
-        local acc = 0
-        pcall(function()
-          hl.gesture({
-            fingers = 3,
-            direction = "horizontal",
-            action = {
-              start  = function() acc = 0 end,
-              update = function(e) if e and e.delta then acc = acc + (e.delta.x or 0) end end,
-              finish = function()
-                if acc < 0 then hl.dispatch(hl.dsp.exec_cmd("${dock} show"))
-                else            hl.dispatch(hl.dsp.exec_cmd("${dock} hide")) end
-              end,
-            },
-          })
-        end)
-      end
-      -- 4-finger drag is CONTEXT-SENSITIVE: focused ON a dock card it shifts the pile
-      -- (left=prev, right=next, same as SUPER+left/right); anywhere else it moves the
-      -- focused window (dock.sh gesture-move runs `movewindow <dir>`, the same dwindle
-      -- swap the old "move" gesture did). The dominant axis + sign of the accumulated
-      -- delta picks l/r/u/d. pcall-guarded like the 3-finger gesture above.
-      do
-        local ax, ay = 0, 0
-        pcall(function()
-          hl.gesture({
-            fingers = 4,
-            direction = "swipe",
-            action = {
-              start  = function() ax, ay = 0, 0 end,
-              update = function(e) if e and e.delta then ax = ax + (e.delta.x or 0); ay = ay + (e.delta.y or 0) end end,
-              finish = function()
-                local dir
-                if math.abs(ax) >= math.abs(ay) then dir = (ax < 0) and "l" or "r"
-                else dir = (ay < 0) and "u" or "d" end
-                hl.dispatch(hl.dsp.exec_cmd("${dock} gesture-move " .. dir))
-              end,
-            },
-          })
-        end)
-      end
+      -- The 3-finger HORIZONTAL pile show/hide is now a CONTINUOUS compositor gesture (action
+      -- "dockpile" in features/hyprland's gesture list -> CDockPileTrackpadGesture), replacing the
+      -- old one-shot Lua-function that only decided the verb on release. Its release command is wired
+      -- below (dock_pile_exec). No more per-frame Lua, so the Lua-config-blackout risk is gone too.
+      -- 4-finger drag = the built-in MOVE gesture (registered in features/hyprland's gesture list),
+      -- made CONTINUOUS by trapezoid.patch's CMoveTrackpadGesture: a drag that starts on a pile card
+      -- slides THAT card live under the finger and, on release, runs gestures:dock_swipe_exec below
+      -- -> dock.sh gesture-move (l/r cycle the pile, none = spring back). A drag anywhere else moves
+      -- the focused window normally. This replaced the old one-shot Lua-function 4-finger gesture.
+      hl.config({ gestures = { dock_swipe_exec = "${dock} gesture-move", dock_pile_exec = "${dock} gesture-pile" } })
       -- SUPER+SHIFT+T: a terminal that opens straight into the dock (SUPER+T is
       -- the normal terminal, in features/hyprland). The --class matches the
       -- auto-route rule above, so it floats, size-locks, pins and joins the pile.
@@ -199,8 +197,51 @@ lib.mkIf (osConfig.my.sidedock.enable && inScope && osConfig.my.desktop.composit
           end)
           return hit
         end
-        hl.on("window.open",  function(w) if w and w.class and dockClasses[w.class] then hl.dispatch(hl.dsp.exec_cmd("${dock} adopt "  .. w.address)) end end)
+        -- Only adopt a REAL top-level window. Wine apps (KakaoTalk) open tooltips / alt-text labels /
+        -- menus / dropdowns as separate windows that SHARE the exe class -- so without this filter the
+        -- dock cascades each one and the pile reshuffles ("really small kakaotalk windows ... the dock
+        -- has to shift"). Reject: too small (a tooltip is barely a line), passive (accepts_input==false,
+        -- a label), OR UNTITLED. The title is the key discriminator -- a real window carries a contact/
+        -- account name ("이시후", "KakaoTalk"); a popup/menu has an EMPTY title (verified live: a 321x244
+        -- popup had none, the chat window did). pcall-guarded, defaulting to ADOPT if the fields can't be
+        -- read, so a real window is never wrongly dropped.
+        local function dockable(w)
+          local ok, skip = pcall(function()
+            local s = w.size or {}
+            local titled = type(w.title) == "string" and #w.title > 0
+            return (s.x or 999) < 120 or (s.y or 999) < 120 or w.accepts_input == false or (not titled)
+          end)
+          return not (ok and skip)
+        end
+        hl.on("window.open",  function(w)
+          -- TEMP DIAG (remove once the popup filter is confirmed): log what dockable() decides for every
+          -- kakaotalk.exe window, so a TITLED popup that still shifts the dock can be caught. /tmp/dock-adopt.log
+          if w and w.class == "kakaotalk.exe" then pcall(function()
+            local s = w.size or {}
+            local msg = "KAKAO sz=" .. tostring(s.x) .. "x" .. tostring(s.y) .. " ai=" .. tostring(w.accepts_input)
+              .. " float=" .. tostring(w.floating) .. " titlelen=" .. tostring(#tostring(w.title or "")) .. " dockable=" .. tostring(dockable(w))
+            hl.dispatch(hl.dsp.exec_cmd("printf '%s\\n' '" .. msg .. "' >> /tmp/dock-adopt.log"))
+          end) end
+          if w and w.class and dockClasses[w.class] and dockable(w) then hl.dispatch(hl.dsp.exec_cmd("${dock} adopt "  .. w.address)) end
+        end)
         hl.on("window.close", function(w) if isDockTagged(w) then hl.dispatch(hl.dsp.exec_cmd("${dock} orphan " .. w.address)) end end)
+        -- Wine/KakaoTalk "open folder" -> redirect its explorer.exe window to the NATIVE file manager
+        -- (dolphin), see folderToDolphin in the let. Fires for every explorer.exe window; the script
+        -- itself filters out the /desktop shell + the tray (anything with no folder path in its cmdline).
+        hl.on("window.open", function(w) if w and w.class == "explorer.exe" then hl.dispatch(hl.dsp.exec_cmd("${folderToDolphin} " .. w.address)) end end)
+        -- KEEP THE DOCK ON ITS HOME MONITOR across workspace switches. The pile is pinned, and
+        -- Hyprland's pin follows the active workspace on EVERY monitor -- so switching a workspace on
+        -- another screen drags the dock across ("flies across screens"). On each workspace change,
+        -- dock.sh 'rehome' re-renders the pile onto its own (rightmost) monitor WITHOUT stealing
+        -- focus, and no-ops when it's hidden or already home (a home-monitor switch, which pin handles
+        -- right, does nothing). Cheap + self-filtering, same as the open/close handlers above.
+        hl.on("workspace.active", function() hl.dispatch(hl.dsp.exec_cmd("${dock} rehome")) end)
+        -- NB: Wine windows "popping up from the back of the pile" is fixed in the COMPOSITOR, not here.
+        -- An earlier window.active/window.urgent -> restack hook FLASHED (it un-popped after the client
+        -- had already raised the card) and missed the X11-configure-request raise entirely (no Lua event
+        -- fires for it, so a card "stayed out until we sift the dock"). The real fix: Window.cpp now
+        -- SKIPS the client-driven raise (activate / onX11ConfigureRequest / onMap) for dock-tagged
+        -- windows, so only the dock's own alter_zorder ever restacks them. See [[kakaotalk-wine-setup]].
         -- AUTO-ADJUST on a live display change: when the monitor layout/scale changes
         -- (e.g. you set a new scale in wdisplays), re-apply the dock geometry from the
         -- fresh viewport so it tracks the new screen size WITHOUT a keypress. dock.sh

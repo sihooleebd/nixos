@@ -281,6 +281,14 @@ in
                 ${pkgs.python3}/bin/python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c["ext/workspaces"]["format"]="{name}"; json.dump(c,open(p,"w"),ensure_ascii=False,indent=4)' \
                   $out/share/hakuspace/config/waybar/module/workspace_module
 
+                # Notification bell: upstream wires it to swaync-client, but this host replaced swaync
+                # with the quickshell notif centre (features/notifcenter) -- swaync-client is GONE, so
+                # exec-if failed (no count) and the click was a no-op. Point the click at the haku-notif
+                # IPC toggle (same thing SUPER+N runs) and drop the swaync count subscription -> a plain
+                # bell that actually opens the centre. (A live count would need a haku-notif IPC; later.)
+                ${pkgs.python3}/bin/python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c["custom/notification"]={"tooltip":False,"format":"󰂚","on-click":"quickshell -c haku-notif ipc call panel toggle","on-click-right":"quickshell -c haku-notif ipc call panel toggle","escape":True}; json.dump(c,open(p,"w"),ensure_ascii=False,indent=4)' \
+                  $out/share/hakuspace/config/waybar/module/notification_module
+
                 # Launch the pygobject layers (cava underbar, desktop icons) via
                 # their OWN wrapper, not `python3 <wrapper>`. Upstream runs
                 # `python3 $SCRIPT`, assuming $SCRIPT is the raw .py. Here it is
@@ -952,13 +960,14 @@ in
             tr -d '\0' < "$HOME/.config/rofi/config.rasi" > "$HOME/.config/rofi/config.rasi.heal" \
               && run mv -f "$HOME/.config/rofi/config.rasi.heal" "$HOME/.config/rofi/config.rasi"
           fi
+          # BACKGROUND REMOVED (user request): just STRIP any previous haku-fullscreen-blur block
+          # and re-append NOTHING, so rofi falls back to the theme's normal compact opaque window.
+          # The old block made `window` fullscreen with a dimmed translucent-black backdrop so the
+          # whole-desktop blur layer could show -- but that fullscreen layer was the source of the
+          # open "blink" (it slid up from the bottom edge) AND the shadow mess. A compact menu has
+          # neither. The sed below still runs on every activation so an already-written config.rasi
+          # self-heals back to no-backdrop.
           run sed -i '/haku-fullscreen-blur/,$d' "$HOME/.config/rofi/config.rasi"
-          cat >> "$HOME/.config/rofi/config.rasi" <<'ROFIBLUR'
-
-/* haku-fullscreen-blur (nix-managed, see features/hakuspace/home.nix) */
-window { fullscreen: true; background-color: rgba(0,0,0,0.45); padding: 25% 32%; border-radius: 0px; }
-mainbox { background-color: @background; border-radius: 4px; padding: 20px; }
-ROFIBLUR
         fi
       '';
 

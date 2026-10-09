@@ -3,6 +3,25 @@
 let
   cfg = config.my.kakaotalk;
 
+  # Wine, patched to route file dialogs to xdg-desktop-portal (Wine MR10060 -- verified to
+  # apply cleanly to 11.0). With the `FileDialogPortal`="always" registry key set in the
+  # launcher's reg block below, GetOpenFileName / GetSaveFileName / IFileDialog /
+  # SHBrowseForFolder ask org.freedesktop.portal.FileChooser instead of Wine drawing its own
+  # dialog -> the session's FileChooser backend (kde -- features/session-services + hakuspace)
+  # shows the native KDE/Dolphin-style picker. Covers ANY wine process (the user's `wine` is
+  # this one). Builds from SOURCE (~1h; offload to a remote builder -- the cached binary can't
+  # carry a patch). portal_dbus.c dlopens libdbus by bare SONAME, which has no global path on
+  # NixOS, so bake the store path (the pattern nixpkgs uses for wine's other dlopen'd libs);
+  # the launcher also exports LD_LIBRARY_PATH as a belt-and-suspenders.
+  winePortal = pkgs.wine.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./portal-filedialog.patch ];
+    buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.dbus ];
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace dlls/comdlg32/portal_dbus.c \
+        --replace-quiet '"libdbus-1.so.3"' '"${pkgs.dbus.lib}/lib/libdbus-1.so.3"'
+    '';
+  });
+
   # KakaoTalk via Wine (no native Linux build, not in nixpkgs). Plain 32-bit
   # `wine` runs this 32-bit app natively in a win32 prefix -- and it's CACHED,
   # unlike the multilib wineWow*, which builds from source (an hour+ on an 8GB
@@ -23,7 +42,13 @@ let
     # i18n.supportedLocales below.
     export LANG=ko_KR.UTF-8
     export LC_ALL=ko_KR.UTF-8
-    export PATH=${lib.makeBinPath (with pkgs; [ wine curl coreutils findutils ])}:$PATH
+    # xdg-utils puts `xdg-open` on Wine's PATH so winebrowser can hand URLs/files/folders to the
+    # NATIVE handlers (browser, PDF viewer, Dolphin, ...) -- see the WineBrowser + folder-association
+    # registry keys below. gio/mimeopen are its resolver fallbacks under a non-KDE session.
+    export PATH=${lib.makeBinPath ([ winePortal ] ++ (with pkgs; [ curl coreutils findutils xdg-utils glib ]))}:$PATH
+    # portal file dialogs: comdlg32's portal_dbus dlopens libdbus at runtime -- make it findable
+    # (the store path is also baked into the build; this covers any edge the baking misses).
+    export LD_LIBRARY_PATH=${pkgs.dbus.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
     mkdir -p "$HOME/Documents/KakaoTalk"
 
@@ -70,13 +95,40 @@ let
     # preedit back to fcitx, which composes + renders Korean correctly.
     # Marker-guarded (once per prefix); bump the marker to re-import on prefixes
     # created before a given key existed.
-    if [ ! -f "$WINEPREFIX/.kakao-reg-v2" ]; then
+    if [ ! -f "$WINEPREFIX/.kakao-reg-v4" ]; then
       reg="$WINEPREFIX/.kakao-reg.reg"
       cat > "$reg" <<'FONTREG'
 REGEDIT4
 
 [HKEY_CURRENT_USER\Software\Wine\X11 Driver]
 "InputStyle"="root"
+"FileDialogPortal"="always"
+
+; Native integration: hand URLs / mailto / folders / documents to the native Linux apps instead
+; of Wine's built-ins. winebrowser resolves each through xdg-open (on PATH via xdg-utils), which
+; uses the desktop's MIME associations -> native browser, mail client, Dolphin, PDF viewer, etc.
+; Browsers/Mailers force winebrowser to prefer xdg-open over its hardcoded browser search.
+[HKEY_CURRENT_USER\Software\Wine\WineBrowser]
+"Browsers"="xdg-open"
+"Mailers"="xdg-open"
+
+; Folder open ("폴더 열기" / Explorer) -> native file manager instead of Wine's winefile.
+[HKEY_CLASSES_ROOT\Directory\shell\open\command]
+@="C:\\windows\\system32\\winebrowser.exe \"%1\""
+
+[HKEY_CLASSES_ROOT\Folder\shell\open\command]
+@="C:\\windows\\system32\\winebrowser.exe \"%1\""
+
+; URL protocols -> native browser / mail (Wine usually defaults these to winebrowser already; set
+; them explicitly so a stale prefix is corrected too).
+[HKEY_CLASSES_ROOT\http\shell\open\command]
+@="C:\\windows\\system32\\winebrowser.exe \"%1\""
+
+[HKEY_CLASSES_ROOT\https\shell\open\command]
+@="C:\\windows\\system32\\winebrowser.exe \"%1\""
+
+[HKEY_CLASSES_ROOT\mailto\shell\open\command]
+@="C:\\windows\\system32\\winebrowser.exe \"%1\""
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes]
 "Gulim"="NanumGothic"
@@ -111,7 +163,7 @@ REGEDIT4
 FONTREG
       wine regedit /S "$reg" >/dev/null 2>&1 || true
       wineserver -w || true
-      touch "$WINEPREFIX/.kakao-reg-v2"
+      touch "$WINEPREFIX/.kakao-reg-v4"
     fi
 
     [ -n "$exe" ] && exec wine "$exe"
@@ -160,6 +212,6 @@ in
 
     # The app itself, per-account (the primary user, via my.kakaotalk.users),
     # the same way every other package-owning feature contributes.
-    my.packages.perUser = lib.genAttrs cfg.users (_: with pkgs; [ wine winetricks kakaotalk ]);
+    my.packages.perUser = lib.genAttrs cfg.users (_: [ winePortal kakaotalk ] ++ (with pkgs; [ winetricks ]));
   };
 }

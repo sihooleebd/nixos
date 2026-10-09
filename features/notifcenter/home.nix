@@ -15,6 +15,23 @@ let
     # tell open from close, so the mutual-exclusion lives at the panel where open is unambiguous.
     exec quickshell -c haku-notif ipc call panel toggle
   '';
+
+  # Weather for the panel. Reuses the system `linecast weather` tool (in the user profile, resolved off
+  # the inherited PATH) and the SAME compact format + cache file the lock screen uses (features/hakuspace
+  # lockWeatherFetch) -- so they stay consistent and share one 30-min fetch instead of hammering it.
+  weatherCmd = pkgs.writeShellScript "haku-notif-weather" ''
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.findutils ]}:$PATH
+    # Full `linecast weather --json` (current + today + 5-day daily + aqi), cached 30 min in its own
+    # file; the panel parses it for a rich card. (The lock screen keeps its compact ~/.cache/lock-weather.)
+    cache="$HOME/.cache/haku-notif-weather.json"
+    mkdir -p "$(dirname "$cache")"
+    if [ ! -s "$cache" ] || [ -n "$(find "$cache" -mmin +30 2>/dev/null)" ]; then
+      touch "$cache" 2>/dev/null   # reset the timer so a slow/failed fetch is not retried every poll
+      out=$(linecast weather --json --print 2>/dev/null)
+      case "$out" in "{"*) printf '%s' "$out" > "$cache" ;; esac   # only overwrite on a valid JSON fetch
+    fi
+    [ -s "$cache" ] && cat "$cache"
+  '';
 in
 lib.mkIf (osConfig.my.notifcenter.enable && inScope && osConfig.my.desktop.compositor == "hyprland") {
   home.packages = [ pkgs.quickshell ];
@@ -54,8 +71,13 @@ lib.mkIf (osConfig.my.notifcenter.enable && inScope && osConfig.my.desktop.compo
       #  - util-linux (setsid): run() detaches every action via `setsid -f` so backgrounded daemons
       #    survive quickshell's process-group teardown -- see the run() comment in shell.qml.
       #  - panelbus: the panel broadcasts `panelbus open notif` on open (mutual exclusion with the dock).
+      #  - libnotify (notify-send) + pipewire (pw-play): the timer/pomodoro end-alert is a toast PLUS a
+      #    short chime (HAKU_ALERT_SOUND), and must fire even when the panel is closed (the countdown
+      #    keeps running regardless).
       ExecStart = pkgs.writeShellScript "haku-notif-start" ''
-        export PATH=${lib.makeBinPath [ pkgs.hyprsunset pkgs.util-linux osConfig.my.panelbus.package ]}''${PATH:+:$PATH}
+        export PATH=${lib.makeBinPath [ pkgs.hyprsunset pkgs.util-linux pkgs.libnotify pkgs.pipewire osConfig.my.panelbus.package ]}''${PATH:+:$PATH}
+        export HAKU_ALERT_SOUND=${pkgs.sound-theme-freedesktop}/share/sounds/freedesktop/stereo/complete.oga
+        export HAKU_WEATHER_CMD=${weatherCmd}
         exec ${pkgs.quickshell}/bin/quickshell -c haku-notif
       '';
       Restart = "on-failure";
